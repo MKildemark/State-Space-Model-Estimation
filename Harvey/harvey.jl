@@ -386,10 +386,10 @@ function recursion_mcmc(y, priors, a1, P1, n_order, chain_init_burned, Sigma; n_
             
             # Step 4: Compute E(alpha | y*)
             a_smooth, _ = kalman_smoother(y_star, a1, P1, theta, n_order)
-            alpha_hat = a_smooth[2:end-1, :]  # exclude first and last
+            alpha_hat = a_smooth[:, :]  # exclude first and last
             
             # Step 5: Draw alpha^*
-            alpha_star = alpha_hat .+ alpha_plus[2:end-1, :]  # Adjusted state
+            alpha_star = alpha_hat .+ alpha_plus[:, :]  # Adjusted state
             
             # Store the sampled alpha
             push!(alphas, alpha_star)
