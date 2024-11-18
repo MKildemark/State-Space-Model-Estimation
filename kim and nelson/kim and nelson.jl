@@ -574,23 +574,23 @@ function recursion_mcmc(y, priors, a1, P1, chain_init_burned, Sigma; n_rec=20000
         if q >= (burn_rec)
             theta = transform_params(current_gamma_rec, priors)
 
-            # # Sample states using Gibbs sampling
-            # # Step 1: Draw alpha^+
+            # Sample states using Gibbs sampling
+            # Step 1: Draw alpha^+
             # alpha_plus_draw = rand(MvNormal(zeros(state_dim), P1))
             
             # # Step 2: Simulate forward recursion to get y^+
-            # y_plus, alpha_plus = simulate_data(theta, n_order, length(y), alpha_plus_draw)
+            # y_plus, alpha_plus = simulate_data(theta, length(y), alpha_plus_draw)
             
             # # Step 3: Construct y*
             # y_star = y - y_plus
             
             # # Step 4: Compute E(alpha | y*)
-            # _, a_smooth = switching_kalman_filter(y_star, theta, n_order, a1, P1)
-            # alpha_hat = a_smooth[1:end-1, :]  # Exclude the last state
+            # _, a_smooth, p_res = switching_kalman_filter(y_star, theta, a1, P1)
+            # alpha_hat = a_smooth[:, :]  # Exclude the last state
             
             # # Step 5: Draw alpha^*
-            # alpha_star = alpha_hat .+ alpha_plus[1:end-1, :]  # Adjusted state
-            #sample states from filters
+            # alpha_star = alpha_hat .+ alpha_plus[:, :]  # Adjusted state
+            
             _, alpha_star, p_res = switching_kalman_filter(y, theta, a1, P1)
             
             # Store the sampled alpha
