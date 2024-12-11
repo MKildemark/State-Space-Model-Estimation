@@ -161,7 +161,7 @@ function kalman_smoother(y, a1, P1, params, n_order)
         else
             P_pred_inv = inv(P_pred[t + 1, :, :])
             J = P_filt[t, :, :] * T' * P_pred_inv
-            a_smooth[t, :] = a_filt[t, :] + J * (a_smooth[t + 1, :] - a_pred[t + 1, :])
+            a_smooth[t, :] = a_filt[t, :] + J * (a_smooth[t + 1, :] - a_pred[t+1, :])
             P_smooth[t, :, :] = P_filt[t, :, :] + J * (P_smooth[t + 1, :, :] - P_pred[t + 1, :, :]) * J'
         end
     end
@@ -173,7 +173,7 @@ function log_likelihood(params, y, a1, P1, n_order)
     # Run Kalman filter
     a_pred, P_pred, a_filt, P_filt, v, F, K = kalman_filter(y, a1, P1, params, n_order)
 
-    loglik = -0.5 * sum(log(2 * π) .+ log.(abs.(F)) .+ (v .^ 2 ./ F))
+    loglik = -0.5 * sum(log(2 * π) .+ log.(F) .+ (v .^ 2 ./ F))
 
     return loglik
 end
@@ -189,17 +189,25 @@ function transform_params(params_unbounded, priors)
     # Transform gamma_rho (Uniform transformation for rho)
     exp_gamma_rho = exp(gamma_rho)
     rho = (a_rho + b_rho * exp_gamma_rho) / (1 + exp_gamma_rho)
-    # rho = (exp_gamma_rho) / (1 + exp_gamma_rho)
 
     # Transform gamma_lambda_c (beta transformation for lambda_c support on (0,1))
     exp_gamma_lambda = exp(gamma_lambda_c)
     lambda_c = (a_lambda + b_lambda * exp_gamma_lambda) / (1 + exp_gamma_lambda)
-    # lambda_c = (exp_gamma_lambda) / (1 + exp_gamma_lambda)
+  
+    # # Transform variance parameters (Inverse-Gamma transformation)
+    # sigma_xi2 = exp(gamma_sigma_xi2)
+    # sigma_kappa2 = exp(gamma_sigma_kappa2)
+    # sigma_epsilon2 = exp(gamma_sigma_epsilon2)
 
-    # Transform variance parameters (Inverse-Gamma transformation)
-    sigma_xi2 = exp(gamma_sigma_xi2)
-    sigma_kappa2 = exp(gamma_sigma_kappa2)
-    sigma_epsilon2 = exp(gamma_sigma_epsilon2)
+    # Transform variance parameters (Uniform transformation)
+    exp_gamma_sigma_xi2 = exp(gamma_sigma_xi2)
+    sigma_xi2 = (a_xi + b_xi * exp_gamma_sigma_xi2) / (1 + exp_gamma_sigma_xi2)
+
+    exp_gamma_sigma_kappa2 = exp(gamma_sigma_kappa2)
+    sigma_kappa2 = (a_kappa + b_kappa * exp_gamma_sigma_kappa2) / (1 + exp_gamma_sigma_kappa2)
+
+    exp_gamma_sigma_epsilon2 = exp(gamma_sigma_epsilon2)
+    sigma_epsilon2 = (a_epsilon + b_epsilon * exp_gamma_sigma_epsilon2) / (1 + exp_gamma_sigma_epsilon2)
 
     return rho, lambda_c, sigma_xi2, sigma_kappa2, sigma_epsilon2
 end
@@ -212,16 +220,19 @@ function log_derivatives_params(params_unbounded, priors)
 
     # Log derivative for rho
     log_derivative_rho = log(b_rho - a_rho) + gamma_rho - 2 * log(1 + exp(gamma_rho))
-    # log_derivative_rho = gamma_rho - 2 * log(1 + exp(gamma_rho))
 
     # Log derivative for lambda_c
     log_derivative_lambda_c= log(b_lambda - a_lambda) + gamma_lambda_c - 2 * log(1 + exp(gamma_lambda_c))
-    # log_derivative_lambda_c = gamma_lambda_c - 2 * log(1 + exp(gamma_lambda_c))
 
-    # Log derivatives for variance parameters
-    log_derivative_sigma_xi2 = gamma_sigma_xi2
-    log_derivative_sigma_kappa2 = gamma_sigma_kappa2
-    log_derivative_sigma_epsilon2 = gamma_sigma_epsilon2
+    # # Inverse Gamma Log derivatives for variance parameters
+    # log_derivative_sigma_xi2 = gamma_sigma_xi2
+    # log_derivative_sigma_kappa2 = gamma_sigma_kappa2
+    # log_derivative_sigma_epsilon2 = gamma_sigma_epsilon2
+
+    # Uniform Log derivatives for variance parameters
+    log_derivative_sigma_xi2 = log(b_xi - a_xi) + gamma_sigma_xi2 - 2 * log(1 + exp(gamma_sigma_xi2))
+    log_derivative_sigma_kappa2 = log(b_kappa - a_kappa) + gamma_sigma_kappa2 - 2 * log(1 + exp(gamma_sigma_kappa2))
+    log_derivative_sigma_epsilon2 = log(b_epsilon - a_epsilon) + gamma_sigma_epsilon2 - 2 * log(1 + exp(gamma_sigma_epsilon2))
 
     return (log_derivative_rho, log_derivative_lambda_c, 
             log_derivative_sigma_xi2, log_derivative_sigma_kappa2, log_derivative_sigma_epsilon2)
@@ -233,21 +244,26 @@ function log_prior(theta, priors)
     rho, lambda_c, sigma_xi2, sigma_kappa2, sigma_epsilon2 = theta
     a_rho, b_rho, a_lambda, b_lambda, a_xi, b_xi, a_kappa, b_kappa, a_epsilon, b_epsilon = priors
 
-    # Log prior rho (uniform 0 to 0.999)
+    # Log prior rho 
     log_prior_rho = log(1 / (b_rho - a_rho))
-    # log_prior_rho = (a_rho - 1) * log(lambda_c) + (b_rho - 1) * log(1 - lambda_c) - (lgamma(a_rho) + lgamma(b_rho) - lgamma(a_rho + b_rho))
-
-    # Log prior lambda_c (beta distribution)
+   
+    # Log prior lambda_c 
     log_prior_lambda_c = log(1 / (b_lambda - a_lambda))  #uniform
-    # log_prior_lambda_c = (a_lambda - 1) * log(lambda_c) + (b_lambda - 1) * log(1 - lambda_c) - (lgamma(a_lambda) + lgamma(b_lambda) - lgamma(a_lambda + b_lambda))
-    
-    # Inverse-Gamma priors for variance parameters
-    log_prior_sigma_xi2 = a_xi * log(b_xi) - lgamma(a_xi) - (a_xi + 1) * log(sigma_xi2) - b_xi / sigma_xi2
-    log_prior_sigma_kappa2 = a_kappa * log(b_kappa) - lgamma(a_kappa) - (a_kappa + 1) * log(sigma_kappa2) - b_kappa / sigma_kappa2
-    log_prior_sigma_epsilon2 = a_epsilon * log(b_epsilon) - lgamma(a_epsilon) - (a_epsilon + 1) * log(sigma_epsilon2) - b_epsilon / sigma_epsilon2
+   
+    # # Inverse-Gamma priors for variance parameters
+    # log_prior_sigma_xi2 = a_xi * log(b_xi) - lgamma(a_xi) - (a_xi + 1) * log(sigma_xi2) - b_xi / sigma_xi2
+    # log_prior_sigma_kappa2 = a_kappa * log(b_kappa) - lgamma(a_kappa) - (a_kappa + 1) * log(sigma_kappa2) - b_kappa / sigma_kappa2
+    # log_prior_sigma_epsilon2 = a_epsilon * log(b_epsilon) - lgamma(a_epsilon) - (a_epsilon + 1) * log(sigma_epsilon2) - b_epsilon / sigma_epsilon2
+
+    # Uniform priors for variance parameters
+    log_prior_sigma_xi2 = log(1 / (b_xi - a_xi))
+    log_prior_sigma_kappa2 = log(1 / (b_kappa - a_kappa))
+    log_prior_sigma_epsilon2 = log(1 / (b_epsilon - a_epsilon))
+
 
     return log_prior_lambda_c + log_prior_rho + log_prior_sigma_xi2 + log_prior_sigma_kappa2 + log_prior_sigma_epsilon2
 end
+
 
 function log_posterior(gamma, priors, y, a1, P1, n_order)
     theta = transform_params(gamma, priors)
@@ -262,14 +278,15 @@ function log_posterior(gamma, priors, y, a1, P1, n_order)
 
     log_jacobian = sum(log_derivatives_params(gamma, priors))
 
-    return log_lik + log_pri + log_jacobian
+    return log_lik + log_jacobian  #+ log_pri
 end
 
 
 
 
 function initialize_mcmc(y, priors, a1, P1, n_order; n_init=40000, burn_init=5000, omega_init=0.1)
-    dim = 5  # Number of parameters
+    dim = length(priors)/2  # Number of parameters
+    dim = Int(dim)
 
     # Initialize storage for the chain
     chain_init = zeros(n_init, dim)
@@ -324,7 +341,9 @@ end
 
 
 function recursion_mcmc(y, priors, a1, P1, n_order, chain_init_burned, Sigma; n_rec=20000, burn_rec=10000, omega_rec=0.1)
-    dim = 5  # Number of parameters
+
+    dim = length(priors)/2  # Number of parameters
+    dim = Int(dim)
 
     # Initialize storage for the recursion chain
     chain_rec = zeros(n_rec, dim)
