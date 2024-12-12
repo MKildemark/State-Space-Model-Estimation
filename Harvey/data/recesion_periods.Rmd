@@ -1,0 +1,87 @@
+
+```{r}
+library(readxl)
+library(dplyr)
+
+library(tidyverse)
+library(scales)
+library(tidyquant)
+library(RSQLite)
+library(dplyr)
+library(lmtest)
+library(stats)
+library(broom)
+library(magrittr)
+
+
+library(tidymodels)
+library(timetk)
+library(plm)
+library(zoo)
+
+library(prais)
+library(car)
+library(sandwich)
+library(clubSandwich)
+
+library(outreg)
+
+
+
+```
+
+#Load data
+```{r}
+#install.packages("BCDating")
+library(BCDating)
+
+```
+
+```{r}
+
+# Read the Excel file
+file_path <- "quarterly_gdp.xlsx"
+data_init <- read_excel(file_path) %>%
+  #select first two columns. first row is also data
+  select(1:2)
+
+
+```
+
+```{r}
+y <- data_init$Value
+#y <- log(y)
+
+y_ts <- ts(y, start = c(1991, 1), frequency = 4)
+# apply BBQ
+BBQ <- BBQ(y_ts)
+
+show(BBQ)
+summary(BBQ)
+plot(BBQ)
+data(y_ts)
+plot(BBQ,y_ts)
+
+```
+```{r}
+#get BBQ states
+BBQ_states <- BBQ@states
+
+# add BBQ states to data_init
+data_init$recesion <- BBQ_states
+
+data_init <- data_init %>%
+  #in recesion change 1 to 0 and -1 to 1
+  mutate(recesion = ifelse(recesion == 1, 0, 1))
+```
+
+```{r}
+
+library(openxlsx)
+write.xlsx(data_init, "quarterly_gdp_recession.xlsx")
+
+
+
+```
+
+
