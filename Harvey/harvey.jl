@@ -186,11 +186,15 @@ function transform_params(params_unbounded, priors)
     gamma_rho, gamma_lambda_c, gamma_sigma_xi2, gamma_sigma_kappa2, gamma_sigma_epsilon2 = params_unbounded
     a_rho, b_rho, a_lambda, b_lambda, a_xi, b_xi, a_kappa, b_kappa, a_epsilon, b_epsilon = priors
 
+  
+
     # Transform gamma_rho (Uniform transformation for rho)
     exp_gamma_rho = exp(gamma_rho)
     rho = (a_rho + b_rho * exp_gamma_rho) / (1 + exp_gamma_rho)
 
-    # Transform gamma_lambda_c (beta transformation for lambda_c support on (0,1))
+    # Transform gamma_lambda_c 
+    # a_lambda = 0.01
+    # b_lambda = 0.99
     exp_gamma_lambda = exp(gamma_lambda_c)
     lambda_c = (a_lambda + b_lambda * exp_gamma_lambda) / (1 + exp_gamma_lambda)
   
@@ -218,10 +222,14 @@ function log_derivatives_params(params_unbounded, priors)
     gamma_rho, gamma_lambda_c, gamma_sigma_xi2, gamma_sigma_kappa2, gamma_sigma_epsilon2 = params_unbounded
     a_rho, b_rho, a_lambda, b_lambda, a_xi, b_xi, a_kappa, b_kappa, a_epsilon, b_epsilon = priors
 
+   
+
     # Log derivative for rho
     log_derivative_rho = log(b_rho - a_rho) + gamma_rho - 2 * log(1 + exp(gamma_rho))
 
     # Log derivative for lambda_c
+    # a_lambda = 0.01
+    # b_lambda = 0.99
     log_derivative_lambda_c= log(b_lambda - a_lambda) + gamma_lambda_c - 2 * log(1 + exp(gamma_lambda_c))
 
     # # Inverse Gamma Log derivatives for variance parameters
@@ -248,7 +256,12 @@ function log_prior(theta, priors)
     log_prior_rho = log(1 / (b_rho - a_rho))
    
     # Log prior lambda_c 
-    log_prior_lambda_c = log(1 / (b_lambda - a_lambda))  #uniform
+    # uniform
+    log_prior_lambda_c = log(1 / (b_lambda - a_lambda))  
+    # beta
+    # log_prior_lambda_c = pdf.(Beta(a_lambda, b_lambda), lambda_c)
+ 
+    
    
     # # Inverse-Gamma priors for variance parameters
     # log_prior_sigma_xi2 = a_xi * log(b_xi) - lgamma(a_xi) - (a_xi + 1) * log(sigma_xi2) - b_xi / sigma_xi2
@@ -278,7 +291,7 @@ function log_posterior(gamma, priors, y, a1, P1, n_order)
 
     log_jacobian = sum(log_derivatives_params(gamma, priors))
 
-    return log_lik + log_jacobian  #+ log_pri
+    return log_lik + log_jacobian  + log_pri
 end
 
 
