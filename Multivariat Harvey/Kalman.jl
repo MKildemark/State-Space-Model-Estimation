@@ -214,12 +214,26 @@ function diffuse_kalman_filter(y, θ, α1, P1, cycle_order, do_smooth, do_sim_sm
 end
 
 
+#########################
+# Likelihood for MLE
+#########################
+
+function neg_log_likelihood(θ, y,  α0 , P0, cycle_order)
+    LogL, _, _ = diffuse_kalman_filter(y,θ,α0, P0, cycle_order, false, false)
+    return -LogL
+end
+
+
+
+
+
+
 
 
 
 
 #########################
-#  Kalman Filter
+#  Normal Kalman Filter
 #########################
 function kalman_filter(y, θ,  α0 , P0, cycle_order)
     Z, H, T, R, Q, P_diffuse = state_space(θ, cycle_order)
@@ -291,16 +305,6 @@ function kalman_smoother(θ, cycle_order, α_f, P_f, α_p, P_p)
     end
 
     return α_s, P_s
-end
-
-
-#########################
-# Likelihood for MLE
-#########################
-
-function neg_log_likelihood(θ, y,  α0 , P0, cycle_order)
-    LogL, _, _,_ ,_ = kalman_filter(y,θ,α0, P0, cycle_order)
-    return -LogL
 end
 
 end
