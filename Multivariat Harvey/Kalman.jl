@@ -16,6 +16,25 @@ using .state_space_model
 Random.seed!(123)
 
 #########################
+#  Helper Random Draws
+#########################
+
+function rand_draw(dim, Σ)
+    # store
+    draws = zeros(dim)
+    # find rows with non-zero variance
+    nonzero_variances = findall(i -> abs(Σ[i,i]) > 0, 1:dim)
+    if !isempty(nonzero_variances)
+        # Extract the submatrix for the nonzero variances.
+        Σ_sub = Σ[nonzero_variances, nonzero_variances]
+        # Draw from the multivariate normal for the nonzero indices.
+        draws[nonzero_variances] = rand(MvNormal(zeros(length(nonzero_variances)), Σ_sub))
+    end
+    return draws
+end
+
+
+#########################
 #  Diffuse Kalman Filter 
 #########################
 function diffuse_kalman_filter(y, θ, α1, P1, cycle_order, do_smooth, do_sim_smooth, diffuse_tol = 1e-6)
@@ -49,12 +68,15 @@ function diffuse_kalman_filter(y, θ, α1, P1, cycle_order, do_smooth, do_sim_sm
 
     # --- Transformation if H is not diagonal ---
     # Check if H is (exactly) diagonal
-    if !isdiag(H)
-        # Schur decomposition
-        Λ,M  = schur(H)
-        y = y * M
-        Z = M' * Z
-        H = Λ
+    if size(H,1) > 1
+        # Check if H is diagonal
+        if !isdiag(H)
+            # Schur decomposition
+            Λ,M  = schur(H)
+            y = y * M
+            Z = M' * Z
+            H = Λ
+        end
     end
     # --- End transformation ---
 
@@ -80,7 +102,7 @@ function diffuse_kalman_filter(y, θ, α1, P1, cycle_order, do_smooth, do_sim_sm
         for t in 1:n_obs
             # first period draw α⁺ from N(0,P1)
             if t == 1
-                α⁺[t, :] = rand(MvNormal(zeros(state_dim), P1))
+                α⁺[t, :] = rand_draw(state_dim, P1) #How to handle diffuse here? Now variance of diffuse states is zero
             else
                 η = rand(MvNormal(zeros(size(Q,1)), Q))
                 α⁺[t, :] = T * α⁺[t-1, :] + R * η 
@@ -215,7 +237,7 @@ end
 
 
 #########################
-# Likelihood for MLE
+# Negative Likelihood for MLE
 #########################
 
 function neg_log_likelihood(θ, y,  α0 , P0, cycle_order)

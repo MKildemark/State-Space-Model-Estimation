@@ -1,6 +1,6 @@
 module MCMC
 
-export mcmc_initialization
+export initialize_mcmc , mcmc_recursion
 
 using Random
 using LinearAlgebra
@@ -103,11 +103,11 @@ function transform_to_bounded(Γ, support)
     log_jac = zeros(length(Γ))
     for i in eachindex(Γ)
         if support[i,1] == -Inf && support[i,2] == Inf
-            θ[i], log_jac = θ_unbounded(Γ[i])
+            θ[i], log_jac[i] = θ_unbounded(Γ[i])
         elseif support[i,1] == 0 && support[i,2] == Inf
-            θ[i], log_jac = θ_bounded_below(Γ[i], support[i,1])
+            θ[i], log_jac[i] = θ_bounded_below(Γ[i], support[i,1])
         else
-            θ[i], log_jac = θ_bounded_above_and_below(Γ[i], support[i,1], support[i,2])
+            θ[i], log_jac[i] = θ_bounded_above_and_below(Γ[i], support[i,1], support[i,2])
         end
     end
     return θ, log_jac
@@ -134,7 +134,7 @@ end
 
 
 #########################
-# Get Priors
+# Priors
 #########################
 
 function priors(θ, prior_distributions, prior_parameters)
@@ -154,83 +154,160 @@ function priors(θ, prior_distributions, prior_parameters)
 end
 
 
+
+#########################
+# Log Posterir
+#########################
+
+function log_posterior(θ, log_jac, prior_info, y, a1, P1, cycle_order)
+    log_lik = -neg_log_likelihood(θ, y, a1, P1, cycle_order)
+    log_prior = priors(θ, prior_info.distributions, prior_info.parameters)
+    log_pri = sum(log_prior)
+    if log_pri == -Inf || isnan(log_lik)
+        return -Inf
+    end
+    log_jacobian = sum(log_jac)
+    return log_lik + log_jacobian + log_pri
+end
+
+
 #########################
 # MCMC Initialization
 #########################
 
-function mcmc_initialization(y, θ0, α0, P0, prior_distributions, prior_parameters, support, cycle_order = 2, n_iter = 10000, n_burn = 5000, ω = 0.01)
+function initialize_mcmc(y, prior_info, a1, P1, θ_init, cycle_order; iter =40000, burn=5000, ω=0.1)
+    # The number of parameters
+    dim = size(prior_info.support, 1)
     
-    # initialize
-    n_params = length(prior_distributions)
-    Γ0 = transform_to_unbounded(θ0, support)
+    # Storage for parameter draws
+    θ = zeros(iter, dim)
+    Γ = zeros(iter, dim)
 
-    
-    Z, H, T, R, Q = state_space(θ0, cycle_order)
-    state_dim = size(T, 1)
+    # Initialize the chain
+    Γ_current = transform_to_unbounded(θ_init, prior_info.support)
+    θ_current, log_jac_current = transform_to_bounded(Γ_current, prior_info.support)
+    current_log_post = log_posterior(θ_current, log_jac_current, prior_info, y, a1, P1, cycle_order)
+    accept = 0
 
-    
-    Γ_draws = zeros(n_iter, n_params)
-    θ_draws = zeros(n_iter, n_params)
-
-    Γ_current = Γ0
-    θ_current, jac_current = transform_to_bounded(Γ_current, support)
-
-    # Run kalman to get initial likelihood
-    LogL,_,_ = diffuse_kalman_filter(y, θ_current,  α0 , P0, cycle_order, false, false)
-
-    log_prior = priors(θ_current, prior_distributions, prior_parameters)
-
-    log_posterior_current = LogL + sum(log_prior) + sum(jac_current)
-
-    accepted = 0  # counter for accepted proposals
-
-    Σ = ω * Matrix(I, n_params, n_params)
-
-    # MCMC
-    @showprogress for i in 1:n_iter
-        Γ_proposal = rand(MvNormal(Γ_current, Σ))
-        θ_proposal, jac_proposal = transform_to_bounded(Γ_proposal, support)
-        log_prior = priors(θ_proposal, prior_distributions, prior_parameters)
-        
-        try
-            LogL, _, _ = diffuse_kalman_filter(y, θ_proposal, α0, P0, cycle_order, false, false)
-        catch err
-            println("Kalman filter failed for θ_proposal: ", θ_proposal)
-            # Option 1: Skip this iteration.
-            continue
-            # Option 2: Alternatively, assign a very low value to LogL so that the candidate is rejected:
-            # LogL = -Inf
+    pb = Progress(iter; desc="Initialization Phase")
+    for s in 1:iter
+        # Propose a new  Γ using a random-walk Gaussian proposal.
+        Γ_star = rand(MvNormal(Γ_current, ω * I(dim)))
+        θ_star, log_jac_star = transform_to_bounded(Γ_star, prior_info.support)
+        log_post_star = log_posterior(θ_star, log_jac_star, prior_info, y, a1, P1, cycle_order)
+        # Compute acceptance probability (using the usual Metropolis–Hastings ratio).
+        η = min(1, exp(log_post_star - current_log_post))
+        if rand() < η
+            θ[s, :] = θ_star
+            Γ[s, :] = Γ_star
+            θ_current = θ_star
+            Γ_current = Γ_star
+            current_log_post = log_post_star
+            accept += 1
+        else
+            θ[s, :] = θ_current
+            Γ[s, :] = Γ_current
+            
         end
-    
-        log_posterior_proposal = LogL + sum(log_prior) + sum(jac_proposal)
-    
-        if log(rand()) < log_posterior_proposal - log_posterior_current
-            Γ_current = Γ_proposal
-            θ_current = θ_proposal
-            log_posterior_current = log_posterior_proposal
-            accepted += 1
-        end
-    
-        Γ_draws[i, :] = Γ_current
-        θ_draws[i, :] = θ_current
+
+
+        next!(pb)
     end
-    
-    Σ_Γ = cov(Γ_draws[n_burn+1:end, :])
-    accept_rate = accepted/n_iter
-    
-    return θ_draws, Γ_draws, Σ_Γ, accept_rate
-    
 
+    acceptance_rate = accept / iter
+    println("Initialization Acceptance Rate: $(acceptance_rate * 100) %")
+  
+    # Compute empirical covariance.
+    Σ = cov(Γ[burn+1:end, :])
+    return θ, Σ, acceptance_rate
 end
 
 
+#########################
+# MCMC Recursion
+#########################
+
+function mcmc_recursion(y,prior_info,a1,P1,cycle_order;
+    iter = 40000,
+    burn = 5000,
+    θ_init = zeros(size(prior_info.support, 1)),
+    Σ = I(size(prior_info.support, 1)),
+    ω = 0.1
+)
+
+    # Number of parameters
+    n_params = size(prior_info.support, 1)
+    #Number of observation
+    n_obs = size(y, 1)
+    #Number of states
+    state_dim = size(P1, 1)
+
+    # Storage for parameter and state draws
+    θ_chain = zeros(iter, n_params)
+    α_draws = zeros(iter, n_obs, state_dim)
+
+    # Current (unbounded) parameter
+    Γ_current = transform_to_unbounded(θ_init, prior_info.support)
+
+    # Transform to bounded space & compute log posterior at initial
+    θ_current, log_jac_current = transform_to_bounded(Γ_current, prior_info.support)
+
+    # Current posterior
+    current_log_post = log_posterior(θ_current, log_jac_current, prior_info, y, a1, P1, cycle_order)
+
+    accept = 0
+
+
+    pb = Progress(iter; desc="Recursion Phase")
+    for s in 1:iter
+        # 1) Propose Γ_star using random-walk with covariance ω * Σ
+        Γ_star = rand(MvNormal(Γ_current, ω * I(n_params)))
+
+        # 2) Transform to bounded space
+        θ_star, log_jac_star = transform_to_bounded(Γ_star, prior_info.support)
+
+        # 3) Compute log posterior for proposal
+        log_post_star = log_posterior(θ_star, log_jac_star, prior_info, y, a1, P1, cycle_order)
+
+        # 4) Metropolis acceptance step
+        # Ratio (in log scale) = log_post_star - current_log_post
+        log_accept_ratio = log_post_star - current_log_post
+        if log_accept_ratio >= 0 || (log_accept_ratio > log(rand()))
+            # Accept
+            Γ_current = Γ_star
+            θ_current = θ_star
+            log_jac_current = log_jac_star
+            current_log_post = log_post_star
+            accept += 1
+        end
+
+        # Store the accepted (θ_current) in the chain
+        θ_chain[s, :] = θ_current
+
+        # 5) After burn-in, draw states alpha using the simulation smoother
+        if s > burn
+            _, α_samp, _ = diffuse_kalman_filter(
+                y, θ_current, a1, P1, cycle_order,
+                true, true
+            )
+            # α_samp is an (n_obs × state_dim) sample
+            α_draws[s,:,:] = α_samp
+        end
+
+        next!(pb)
+    end
+
+    α_draws =  α_draws[burn+1:end, :, :]
+
+    # Acceptance rate
+    accept_rate = accept / iter
+    println("Recursion Acceptance Rate: $(accept_rate * 100) %")
+
+    return θ_chain, α_draws, accept_rate
 end
 
-    
-
-    
-    
 
 
+end  # module MCMCRoutines
 
 

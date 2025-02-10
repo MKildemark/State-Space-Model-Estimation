@@ -13,9 +13,88 @@ using SpecialFunctions
 Random.seed!(123)
 
 #########################
-# 1. Multivariate State-Space
+# Univariat State-Space
 #########################
-function state_space(θ, cycle_order)
+function uni_state_space(θ, cycle_order)
+    # Parameter vector for the univariate model:
+    #   θ = [ ρ, λ_c, σ_ε, σ_ξ, σ_κ ]
+    ρ     = θ[1]
+    λ_c   = θ[2]
+    σ_ε   = θ[3]
+    σ_ξ   = θ[4]
+    σ_κ   = θ[5]
+
+    # The state vector is defined as:
+    #   [ u_t, β_t, ψ_{2,t}, ψ_{2,t}*, ψ_{1,t}, ψ_{1,t}* ]
+    state_dim = 6
+
+    ##########################
+    # 1. Measurement Equation
+    ##########################
+    # y_t = u_t + ψ_{2,t} + ε_t, with ε_t ~ N(0, σ_ε)
+    # Z selects u_t (state[1]) and ψ_{2,t} (state[3])
+    Z = zeros(1, state_dim)
+    Z[1, 1] = 1      # u_t
+    Z[1, 3] = 1      # ψ_{2,t}
+
+    # Measurement error covariance 
+    H = [σ_ε]
+
+    ##########################
+    # 2. Transition Equation
+    ##########################
+    T = zeros(state_dim, state_dim)
+    # -- Trend equations --
+    # u_t = u_{t-1} + β_{t-1}
+    T[1, 1] = 1;  T[1, 2] = 1
+    # β_t = β_{t-1} + ξ_t
+    T[2, 2] = 1
+
+    # -- Second-order cycle for ψ_{2,t} and ψ_{2,t}* --
+    # ψ_{2,t}   = ρcosλ_c·ψ_{2,t-1} + ρsinλ_c·ψ_{2,t-1}* + ψ_{1,t-1}
+    T[3, 3] = ρ*cos(λ_c);  T[3, 4] = ρ*sin(λ_c);  T[3, 5] = 1
+    # ψ_{2,t}*  = -ρsinλ_c·ψ_{2,t-1} + ρcosλ_c·ψ_{2,t-1}* + ψ_{1,t-1}*
+    T[4, 3] = -ρ*sin(λ_c); T[4, 4] = ρ*cos(λ_c);  T[4, 6] = 1
+
+    # -- First-order cycle for ψ_{1,t} and ψ_{1,t}* --
+    # ψ_{1,t}  = ρcosλ_c·ψ_{1,t-1} + ρsinλ_c·ψ_{1,t-1}* + κ_t
+    T[5, 5] = ρ*cos(λ_c);  T[5, 6] = ρ*sin(λ_c)
+    # ψ_{1,t}* = -ρsinλ_c·ψ_{1,t-1} + ρcosλ_c·ψ_{1,t-1}* + κ_t^*
+    T[6, 5] = -ρ*sin(λ_c); T[6, 6] = ρ*cos(λ_c)
+
+    ##########################
+    # 3. Selection and Process Noise
+    ##########################
+    # The shocks:
+    #   ξ_t   affects β_t (second state)
+    #   κ_t   affects ψ_{1,t} (fifth state)
+    #   κ_t^* affects ψ_{1,t}* (sixth state)
+    R = zeros(state_dim, 3)
+    R[2, 1] = 1   # β_t gets ξ_t
+    R[5, 2] = 1   # ψ_{1,t} gets κ_t
+    R[6, 3] = 1   # ψ_{1,t}* gets κ_t^*
+
+    # Process noise covariance matrix for the shocks:
+    Q = zeros(3, 3)
+    Q[1, 1] = σ_ξ
+    Q[2, 2] = σ_κ
+    Q[3, 3] = σ_κ
+
+    # Diffuse prior for the nonstationary states: u_t and β_t.
+    P_diffuse = zeros(state_dim, state_dim)
+    P_diffuse[1:2, 1:2] = Matrix(I, 2, 2)
+
+    return Z, H, T, R, Q, P_diffuse
+end
+
+
+
+
+
+#########################
+# Multivariate State-Space
+#########################
+function multi_state_space(θ, cycle_order)
     # Unpack parameters.
     #theta = [ ρ, λ_c, c₁, c₂, v_ε, v_ξ, v_κ, σ²_ε,y, σ²_ξ,y, σ²_κ,y, σ²_ε,π, σ²_ξ,π, σ²_κ,π ]
     ρ          = θ[1]
@@ -164,7 +243,22 @@ end
 
 
 #########################
-# 2. Simulation Function
+# Choose Model
+#########################
+
+function state_space(θ, cycle_order)
+    if length(θ) == 5
+        return uni_state_space(θ, cycle_order)
+    elseif length(θ) == 13
+        return multi_state_space(θ, cycle_order)
+    else
+        error("Incorrect number of parameters.")
+    end
+end
+
+
+#########################
+# Simulation Function
 #########################
 function simulate_data(θ, cycle_order, n_obs)
     # Retrieve system matrices from the multivariate state-space function.
