@@ -1,6 +1,6 @@
 module MCMC
 
-export initialize_mcmc , mcmc_recursion
+export MCMC_estimation
 
 using Random
 using LinearAlgebra
@@ -16,7 +16,6 @@ include("Kalman.jl")
 using .kalman
 
 Random.seed!(123)
-
 
 #########################
 # Helpers to Transform parameters from unbounded to bounded support
@@ -59,28 +58,24 @@ function Γ_unbounded(θ)
     return Γ
 end
 
-
 #########################
 # Helpers for Prior Densities
 #########################
 
 function normal(θ, a, b)
     # a is mean and b is variance
-    # unboundend
     log_p = -log(sqrt(2*π*b)) - ((θ - a)^2) / (2*b) 
     return log_p
 end
 
 function inverse_gamma(θ, a, b)
     # a is shape and b is scale
-    # non-negative
     log_p = a*log(b) - lgamma(a) - (a+1)*log(θ) - b/θ
     return log_p
 end
 
 function beta(θ, a, b)
-    # a is shape1 and b is shape2
-    # bounded between 0 and 1
+    # a is shape1 and b is shape2; support: (0,1)
     log_p = (a-1)*log(θ) + (b-1)*log(1-θ) - lgamma(a) - lgamma(b) + lgamma(a+b)
     return log_p
 end
@@ -91,11 +86,8 @@ function uniform(θ, a, b)
     return log_p
 end
 
-
-
-
 #########################
-# Tranform unbounded parameters Γ to bounded θ
+# Transform unbounded parameters Γ to bounded θ
 #########################
 
 function transform_to_bounded(Γ, support)
@@ -114,7 +106,7 @@ function transform_to_bounded(Γ, support)
 end
 
 #########################
-# Tranform bounded parameters θ to unbounded Γ (Used for θ0)
+# Transform bounded parameters θ to unbounded Γ (Used for θ₀)
 #########################
 
 function transform_to_unbounded(θ, support)
@@ -129,9 +121,7 @@ function transform_to_unbounded(θ, support)
         end
     end
     return Γ
-    
 end
-
 
 #########################
 # Priors
@@ -154,12 +144,12 @@ function priors(θ, prior_distributions, prior_parameters)
 end
 
 
-
 #########################
-# Log Posterir
+# Log Posterior
 #########################
 
 function log_posterior(θ, log_jac, prior_info, y, a1, P1, cycle_order)
+    # The likelihood is computed in a state-space context (using the Kalman filter)
     log_lik = -neg_log_likelihood(θ, y, a1, P1, cycle_order)
     log_prior = priors(θ, prior_info.distributions, prior_info.parameters)
     log_pri = sum(log_prior)
@@ -171,143 +161,145 @@ function log_posterior(θ, log_jac, prior_info, y, a1, P1, cycle_order)
 end
 
 
+
 #########################
-# MCMC Initialization
+# MCMC Estimation
 #########################
 
-function initialize_mcmc(y, prior_info, a1, P1, θ_init, cycle_order; iter =40000, burn=5000, ω=0.1)
-    # The number of parameters
+function MCMC_estimation(y, prior_info, a1, P1, cycle_order;
+              iter_init = 40000,
+              burn_init = 5000,
+              iter_rec = 10000,
+              burn_rec = 5000,
+              θ_init = zeros(size(prior_info.support, 1)),
+              ω = 0.1,
+              adapt_interval = 100,
+              target_low = 0.25,
+              target_high = 0.35)
+
+    #############################
+    # Initialization Phase 
+    #############################
     dim = size(prior_info.support, 1)
-    
-    # Storage for parameter draws
-    θ = zeros(iter, dim)
-    Γ = zeros(iter, dim)
+    θ_init_chain = zeros(iter_init, dim)
+    Γ_chain = zeros(iter_init, dim)
 
-    # Initialize the chain
+    # Initialize in unbounded space
     Γ_current = transform_to_unbounded(θ_init, prior_info.support)
     θ_current, log_jac_current = transform_to_bounded(Γ_current, prior_info.support)
     current_log_post = log_posterior(θ_current, log_jac_current, prior_info, y, a1, P1, cycle_order)
-    accept = 0
+    accept_init_total = 0
+    block_accept_count = 0
 
-    pb = Progress(iter; desc="Initialization Phase")
-    for s in 1:iter
-        # Propose a new  Γ using a random-walk Gaussian proposal.
+    pb = Progress(iter_init; desc="Initialization Phase")
+    for s in 1:iter_init
+        # Propose new Γ using a random walk with covariance ω * I
         Γ_star = rand(MvNormal(Γ_current, ω * I(dim)))
         θ_star, log_jac_star = transform_to_bounded(Γ_star, prior_info.support)
         log_post_star = log_posterior(θ_star, log_jac_star, prior_info, y, a1, P1, cycle_order)
-        # Compute acceptance probability (using the usual Metropolis–Hastings ratio).
+
+        # Metropolis acceptance step
         η = min(1, exp(log_post_star - current_log_post))
         if rand() < η
-            θ[s, :] = θ_star
-            Γ[s, :] = Γ_star
-            θ_current = θ_star
-            Γ_current = Γ_star
-            current_log_post = log_post_star
-            accept += 1
-        else
-            θ[s, :] = θ_current
-            Γ[s, :] = Γ_current
-            
-        end
-
-
-        next!(pb)
-    end
-
-    acceptance_rate = accept / iter
-    println("Initialization Acceptance Rate: $(acceptance_rate * 100) %")
-  
-    # Compute empirical covariance.
-    Σ = cov(Γ[burn+1:end, :])
-    return θ, Σ, acceptance_rate
-end
-
-
-#########################
-# MCMC Recursion
-#########################
-
-function mcmc_recursion(y,prior_info,a1,P1,cycle_order;
-    iter = 40000,
-    burn = 5000,
-    θ_init = zeros(size(prior_info.support, 1)),
-    Σ = I(size(prior_info.support, 1)),
-    ω = 0.1
-)
-
-    # Number of parameters
-    n_params = size(prior_info.support, 1)
-    #Number of observation
-    n_obs = size(y, 1)
-    #Number of states
-    state_dim = size(P1, 1)
-
-    # Storage for parameter and state draws
-    θ_chain = zeros(iter, n_params)
-    α_draws = zeros(iter, n_obs, state_dim)
-
-    # Current (unbounded) parameter
-    Γ_current = transform_to_unbounded(θ_init, prior_info.support)
-
-    # Transform to bounded space & compute log posterior at initial
-    θ_current, log_jac_current = transform_to_bounded(Γ_current, prior_info.support)
-
-    # Current posterior
-    current_log_post = log_posterior(θ_current, log_jac_current, prior_info, y, a1, P1, cycle_order)
-
-    accept = 0
-
-
-    pb = Progress(iter; desc="Recursion Phase")
-    for s in 1:iter
-        # 1) Propose Γ_star using random-walk with covariance ω * Σ
-        Γ_star = rand(MvNormal(Γ_current, ω * I(n_params)))
-
-        # 2) Transform to bounded space
-        θ_star, log_jac_star = transform_to_bounded(Γ_star, prior_info.support)
-
-        # 3) Compute log posterior for proposal
-        log_post_star = log_posterior(θ_star, log_jac_star, prior_info, y, a1, P1, cycle_order)
-
-        # 4) Metropolis acceptance step
-        # Ratio (in log scale) = log_post_star - current_log_post
-        log_accept_ratio = log_post_star - current_log_post
-        if log_accept_ratio >= 0 || (log_accept_ratio > log(rand()))
-            # Accept
+            θ_init_chain[s, :] = θ_star
+            Γ_chain[s, :] = Γ_star
             Γ_current = Γ_star
             θ_current = θ_star
             log_jac_current = log_jac_star
             current_log_post = log_post_star
-            accept += 1
+            accept_init_total += 1
+            block_accept_count += 1
+        else
+            θ_init_chain[s, :] = θ_current
+            Γ_chain[s, :] = Γ_current
         end
 
-        # Store the accepted (θ_current) in the chain
+        # Adapt ω every adapt_interval iterations
+        if mod(s, adapt_interval) == 0
+            block_accept_rate = block_accept_count / adapt_interval
+            if block_accept_rate < target_low
+                ω *= 0.9  # proposals too large → lower ω to increase acceptance
+            elseif block_accept_rate > target_high
+                ω *= 1.1  # proposals too small → increase ω to explore more
+            end
+            block_accept_count = 0  # reset counter for next block
+        end
+        next!(pb)
+    end
+
+    init_accept_rate = accept_init_total / iter_init
+    println("Initialization Acceptance Rate: $(init_accept_rate * 100)%")
+    
+    # Use the draws after burn-in to compute an empirical covariance for the unbounded parameters.
+    Σ_emp = cov(Γ_chain[burn_init+1:end, :])
+
+    #############################
+    # Recursion Phase
+    #############################
+    # Use the final draw from initialization as the starting value.
+    Γ_current = Γ_chain[end, :]
+    θ_current, log_jac_current = transform_to_bounded(Γ_current, prior_info.support)
+    current_log_post = log_posterior(θ_current, log_jac_current, prior_info, y, a1, P1, cycle_order)
+
+    n_params = dim
+    n_obs = size(y, 1)
+    state_dim = size(P1, 1)
+
+    θ_chain = zeros(iter_rec, n_params)
+    α_draws = zeros(iter_rec, n_obs, state_dim)
+    accept_rec_total = 0
+    block_accept_count = 0  # for adaptive updates during recursion burn-in
+
+    pb = Progress(iter_rec; desc="Recursion Phase")
+    for s in 1:iter_rec
+        # Propose new Γ using the tuned covariance ω * Σ_emp
+        Γ_star = rand(MvNormal(Γ_current, ω * Σ_emp))
+        θ_star, log_jac_star = transform_to_bounded(Γ_star, prior_info.support)
+        log_post_star = log_posterior(θ_star, log_jac_star, prior_info, y, a1, P1, cycle_order)
+        log_accept_ratio = log_post_star - current_log_post
+
+        if log_accept_ratio >= 0 || (log_accept_ratio > log(rand()))
+            Γ_current = Γ_star
+            θ_current = θ_star
+            log_jac_current = log_jac_star
+            current_log_post = log_post_star
+            accept_rec_total += 1
+            block_accept_count += 1
+        end
+
         θ_chain[s, :] = θ_current
 
-        # 5) After burn-in, draw states alpha using the simulation smoother
-        if s > burn
+        # After burn-in, draw state trajectories using the simulation smoother.
+        if s > burn_rec
             _, α_samp, _ = diffuse_kalman_filter(
                 y, θ_current, a1, P1, cycle_order,
                 true, true
             )
-            # α_samp is an (n_obs × state_dim) sample
-            α_draws[s,:,:] = α_samp
+            α_draws[s, :, :] = α_samp
         end
 
+        # Adapt ω every adapt_interval iterations.
+        if mod(s, adapt_interval) == 0
+            block_accept_rate = block_accept_count / adapt_interval
+            if block_accept_rate < target_low
+                ω *= 0.9
+            elseif block_accept_rate > target_high
+                ω *= 1.1
+            end
+            block_accept_count = 0
+        end
         next!(pb)
     end
 
-    α_draws =  α_draws[burn+1:end, :, :]
+    rec_accept_rate = accept_rec_total / iter_rec
+    println("Recursion Acceptance Rate: $(rec_accept_rate * 100)%")
 
-    # Acceptance rate
-    accept_rate = accept / iter
-    println("Recursion Acceptance Rate: $(accept_rate * 100) %")
+    # Retain only the draws after burn-in for the recursion phase.
+    θ_chain_post = θ_chain[burn_rec+1:end, :]
+    α_draws_post = α_draws[burn_rec+1:end, :, :]
 
-    return θ_chain, α_draws, accept_rate
+    return θ_chain_post, θ_init_chain, α_draws_post
 end
 
 
-
-end  # module MCMCRoutines
-
-
+end  # module MCMC
