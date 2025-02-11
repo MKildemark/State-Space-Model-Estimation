@@ -18,7 +18,6 @@ Random.seed!(123)
 #########################
 #  Helper Random Draws
 #########################
-
 function rand_draw(dim, Σ)
     # store
     draws = zeros(dim)
