@@ -18,6 +18,23 @@ using .kalman
 Random.seed!(123)
 
 #########################
+#  Helper Check Positive definite
+#########################
+function positive_definite_check(θ, cycle_order, obs_dim)
+    if obs_dim == 1
+        return true
+    else
+        Z, H, T, R, Q, P_diffuse = state_space_model.state_space(θ, cycle_order)
+        if isposdef(H) && isposdef(Q)
+            return true
+        else
+            return false
+        end
+    end
+end
+
+
+#########################
 # Helpers to Transform parameters from unbounded to bounded support
 #########################
 
@@ -183,6 +200,7 @@ function MCMC_estimation(y, prior_info, a1, P1, cycle_order;
     dim = size(prior_info.support, 1)
     θ_init_chain = zeros(iter_init, dim)
     Γ_chain = zeros(iter_init, dim)
+    obs_dim = size(y, 2)
 
     # Initialize in unbounded space
     Γ_current = transform_to_unbounded(θ_init, prior_info.support)
@@ -196,23 +214,22 @@ function MCMC_estimation(y, prior_info, a1, P1, cycle_order;
         # Propose new Γ using a random walk with covariance ω * I
         Γ_star = rand(MvNormal(Γ_current, ω * I(dim)))
         θ_star, log_jac_star = transform_to_bounded(Γ_star, prior_info.support)
-        log_post_star = log_posterior(θ_star, log_jac_star, prior_info, y, a1, P1, cycle_order)
-
-        # Metropolis acceptance step
-        η = min(1, exp(log_post_star - current_log_post))
-        if rand() < η
-            θ_init_chain[s, :] = θ_star
-            Γ_chain[s, :] = Γ_star
-            Γ_current = Γ_star
-            θ_current = θ_star
-            log_jac_current = log_jac_star
-            current_log_post = log_post_star
-            accept_init_total += 1
-            block_accept_count += 1
-        else
-            θ_init_chain[s, :] = θ_current
-            Γ_chain[s, :] = Γ_current
+        # Check if H and Q are postive definite else reject draw
+        positive_definite = positive_definite_check(θ_star, cycle_order, obs_dim)
+        if positive_definite
+            log_post_star = log_posterior(θ_star, log_jac_star, prior_info, y, a1, P1, cycle_order)
+            log_accept_ratio = log_post_star - current_log_post
+            if log_accept_ratio > log(rand())
+                Γ_current = Γ_star
+                θ_current = θ_star
+                log_jac_current = log_jac_star
+                current_log_post = log_post_star
+                accept_init_total += 1
+                block_accept_count += 1
+            end
         end
+        θ_init_chain[s, :] = θ_current
+        Γ_chain[s, :] = Γ_current 
 
         # Adapt ω every adapt_interval iterations
         if mod(s, adapt_interval) == 0
@@ -255,16 +272,20 @@ function MCMC_estimation(y, prior_info, a1, P1, cycle_order;
         # Propose new Γ using the tuned covariance ω * Σ_emp
         Γ_star = rand(MvNormal(Γ_current, ω * Σ_emp))
         θ_star, log_jac_star = transform_to_bounded(Γ_star, prior_info.support)
-        log_post_star = log_posterior(θ_star, log_jac_star, prior_info, y, a1, P1, cycle_order)
-        log_accept_ratio = log_post_star - current_log_post
+        # Check if H and Q are postive definite else auto reject draw
+        positive_definite = positive_definite_check(θ_star, cycle_order, obs_dim)
+        if positive_definite
+            log_post_star = log_posterior(θ_star, log_jac_star, prior_info, y, a1, P1, cycle_order)
+            log_accept_ratio = log_post_star - current_log_post
 
-        if log_accept_ratio >= 0 || (log_accept_ratio > log(rand()))
-            Γ_current = Γ_star
-            θ_current = θ_star
-            log_jac_current = log_jac_star
-            current_log_post = log_post_star
-            accept_rec_total += 1
-            block_accept_count += 1
+            if log_accept_ratio > log(rand())
+                Γ_current = Γ_star
+                θ_current = θ_star
+                log_jac_current = log_jac_star
+                current_log_post = log_post_star
+                accept_rec_total += 1
+                block_accept_count += 1
+            end
         end
 
         θ_chain[s, :] = θ_current

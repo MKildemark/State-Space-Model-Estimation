@@ -26,7 +26,7 @@ function uni_state_space(θ, cycle_order)
 
     # The state vector is defined as:
     #   [ u_t, β_t, ψ_{2,t}, ψ_{2,t}*, ψ_{1,t}, ψ_{1,t}* ]
-    state_dim = 6
+    state_dim = 2 + 2*cycle_order
 
     ##########################
     # 1. Measurement Equation
@@ -157,7 +157,7 @@ function multi_state_space(θ, cycle_order)
     Σ_ε = [σ2_ε_y   v_ε;
         v_ε      σ2_ε_π]
     H = Σ_ε
-    
+
 
     ###########################
     # 2. Transition Equation
