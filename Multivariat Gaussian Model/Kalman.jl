@@ -107,7 +107,7 @@ function diffuse_kalman_filter(y, θ, α1, P1, cycle_order, do_smooth, do_sim_sm
                 α⁺[t, :] = T * α⁺[t-1, :] + R * η 
             end
             ε = rand(MvNormal(zeros(obs_dim), H))
-            y⁺[t, :] = Z * α⁺[t, :] + ε
+            y⁺[t, :] = Z * α⁺[t, :] + ε 
         end
         y = y - y⁺
     end

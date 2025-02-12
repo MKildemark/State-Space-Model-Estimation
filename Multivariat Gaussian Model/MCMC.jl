@@ -208,6 +208,7 @@ function MCMC_estimation(y, prior_info, a1, P1, cycle_order;
     current_log_post = log_posterior(θ_current, log_jac_current, prior_info, y, a1, P1, cycle_order)
     accept_init_total = 0
     block_accept_count = 0
+    accept_target = (target_high+target_low)/2
 
     pb = Progress(iter_init; desc="Initialization Phase")
     for s in 1:iter_init
@@ -234,11 +235,9 @@ function MCMC_estimation(y, prior_info, a1, P1, cycle_order;
         # Adapt ω every adapt_interval iterations
         if mod(s, adapt_interval) == 0
             block_accept_rate = block_accept_count / adapt_interval
-            if block_accept_rate < target_low
-                ω *= 0.9  # proposals too large → lower ω to increase acceptance
-            elseif block_accept_rate > target_high
-                ω *= 1.1  # proposals too small → increase ω to explore more
-            end
+            # if block_accept_rate < target_low || block_accept_rate > target_high
+            ω *= exp((block_accept_rate - accept_target)/1)
+            # end
             block_accept_count = 0  # reset counter for next block
         end
         next!(pb)
@@ -302,11 +301,9 @@ function MCMC_estimation(y, prior_info, a1, P1, cycle_order;
         # Adapt ω every adapt_interval iterations.
         if mod(s, adapt_interval) == 0
             block_accept_rate = block_accept_count / adapt_interval
-            if block_accept_rate < target_low
-                ω *= 0.9
-            elseif block_accept_rate > target_high
-                ω *= 1.1
-            end
+            # if block_accept_rate < target_low || block_accept_rate > target_high
+            ω *= exp((block_accept_rate - accept_target)/1)
+            # end
             block_accept_count = 0
         end
         next!(pb)
