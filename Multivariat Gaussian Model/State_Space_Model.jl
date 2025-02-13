@@ -1,7 +1,6 @@
 module state_space_model
 
-export state_space, simulate_data #, kalman_filter, kalman_smoother,
-      # neg_log_likelihood
+export state_space, simulate_data, standardize_data
 
 using Random
 using LinearAlgebra
@@ -15,7 +14,7 @@ Random.seed!(123)
 #########################
 # Univariat State-Space
 #########################
-function uni_state_space(θ, cycle_order)
+function uni_state_space(θ, cycle_order, σʸ)
     # Parameter vector for the univariate model:
     #   θ = [ ρ, λ_c, σ_ε, σ_ξ, σ_κ ]
     ρ     = θ[1]
@@ -36,9 +35,14 @@ function uni_state_space(θ, cycle_order)
     Z = zeros(1, state_dim)
     Z[1, 1] = 1      # u_t
     Z[1, 3] = 1      # ψ_{2,t}
+    # rescale 
+
+    Z = Z ./ σʸ
 
     # Measurement error covariance 
-    H = [σ_ε]
+    H = [σ_ε/(σʸ^2)]
+    
+    
 
     ##########################
     # 2. Transition Equation
@@ -94,22 +98,22 @@ end
 #########################
 # Multivariate State-Space
 #########################
-function multi_state_space(θ, cycle_order)
+function multi_state_space(θ, cycle_order, σʸ)
     # Unpack parameters.
     #theta = [ ρ, λ_c, c₁, c₂, v_ε, v_ξ, v_κ, σ²_ε,y, σ²_ξ,y, σ²_κ,y, σ²_ε,π, σ²_ξ,π, σ²_κ,π ]
     ρ          = θ[1]
     λ_c        = θ[2]
     c_1        = θ[3]
     c_2        = θ[4]
-    v_ε        = θ[5]
-    v_ξ        = θ[6]
-    v_κ        = θ[7]
-    σ2_ε_y     = θ[8]
-    σ2_ξ_y     = θ[9]
-    σ2_κ_y     = θ[10]
-    σ2_ε_π     = θ[11]
-    σ2_ξ_π     = θ[12]
-    σ2_κ_π     = θ[13]
+    v_ε        = 0.0
+    v_ξ        = 0.0
+    v_κ        = 0.0
+    σ2_ε_y     = θ[5]
+    σ2_ξ_y     = θ[6]
+    σ2_κ_y     = θ[7]
+    σ2_ε_π     = θ[8]
+    σ2_ξ_π     = θ[9]
+    σ2_κ_π     = θ[10]
 
 
     # Define the state vector dimension.
@@ -157,6 +161,15 @@ function multi_state_space(θ, cycle_order)
     Σ_ε = [σ2_ε_y   v_ε;
         v_ε      σ2_ε_π]
     H = Σ_ε
+
+    #rescale
+    # if sigma is 2 dimensional, rescale
+    if length(σʸ) == 2
+        σʸ = Diagonal(σʸ)
+        Z = inv(σʸ) * Z
+        H = inv(σʸ) * H * inv(σʸ)
+    end
+
 
 
     ###########################
@@ -242,15 +255,66 @@ function multi_state_space(θ, cycle_order)
 end
 
 
+########################
+# Simple bivariat for testing
+########################
+
+function simple_bi_state_space(θ, σʸ)
+    # θ = [σ²_ε_y, σ²_η_y, σ²_ε_π, σ²_η_π]
+    σ2_ε_y = θ[1]
+    σ2_η_y = θ[2]
+    σ2_ε_π = θ[3]
+    σ2_η_π = θ[4]
+
+    state_dim = 2  # [μ^y, μ^π]
+    obs_dim   = 2  # Observations: [y, π]
+
+    # 1. Observation Equation:
+    # y_t = μ_t^y + ε_t^y,  π_t = μ_t^π + ε_t^π
+    Z = Matrix{Float64}(I, obs_dim, state_dim)
+
+    # Measurement error covariance:
+    H = [σ2_ε_y   0.0;
+         0.0    σ2_ε_π]
+
+    # Optionally, if you want to rescale the observations, you can use σʸ.
+    # (Here we assume σʸ is either 1 or a 2-element vector.)
+    if length(σʸ) == 2
+        σ_scale = Diagonal(σʸ)
+        Z = inv(σ_scale) * Z
+        H = inv(σ_scale) * H * inv(σ_scale)
+    end
+
+    # 2. Transition Equation:
+    # μ_t = μ_{t-1} + η_t, so T is the identity matrix.
+    T = Matrix{Float64}(I, state_dim, state_dim)
+
+    # 3. Selection and Process Noise:
+    # The state noise enters directly:
+    R = Matrix{Float64}(I, state_dim, state_dim)
+    Q = [σ2_η_y   0.0;
+         0.0    σ2_η_π]
+
+    # Diffuse prior for the state (set as an identity matrix)
+    # P_diffuse = Matrix{Float64}(I, state_dim, state_dim)
+    P_diffuse = zeros(state_dim, state_dim)
+
+    return Z, H, T, R, Q, P_diffuse
+end
+
+
+
 #########################
 # Choose Model
 #########################
 
-function state_space(θ, cycle_order)
+function state_space(θ, cycle_order, σʸ)
     if length(θ) == 5
-        return uni_state_space(θ, cycle_order)
-    elseif length(θ) == 13
-        return multi_state_space(θ, cycle_order)
+        return uni_state_space(θ, cycle_order, σʸ)
+    elseif length(θ) == 10
+        return multi_state_space(θ, cycle_order,σʸ)
+    elseif length(θ) == 4
+        return simple_bi_state_space(θ, σʸ)
     else
         error("Incorrect number of parameters.")
     end
@@ -262,26 +326,52 @@ end
 #########################
 function simulate_data(θ, cycle_order, n_obs)
     # Retrieve system matrices from the multivariate state-space function.
-    Z, H, T, R, Q = state_space(θ, cycle_order)
+
+    Z, H, T, R, Q = state_space(θ, cycle_order, 1.0)
     state_dim = size(T, 1)
     obs_dim = size(Z, 1)  
     
     # Initialize arrays.
-    α = zeros(n_obs, state_dim)
-    y = zeros(n_obs, obs_dim)
+    α = zeros(state_dim, n_obs)
+    y = zeros(obs_dim, n_obs)
 
     α_current = zeros(state_dim)
     for t in 1:n_obs
         # simulate state evolution:
         η = rand(MvNormal(zeros(size(Q,1)), Q))
         α_current = T * α_current + R * η
-        α[t, :] = α_current
+        α[:, t] = α_current
         # simulate measurement:
         ε = rand(MvNormal(zeros(obs_dim), H))
-        y[t, :] = Z * α_current + ε
+        y[:, t] = Z * α_current + ε
     end
     
     return y, α
 end
+
+
+
+#########################
+# Standardise (First differences of) data 
+#########################
+
+function standardize_data(y)
+    n_vars, n_obs = size(y)
+    y_std = similar(y)
+    σʸ = zeros(n_vars)
+    
+    # Loop over each column (variable)
+    for j in 1:n_vars
+        # Compute standard deviation of first differences.
+    
+        s = std(diff(y[j, :]))
+        σʸ[j] = s
+        # Scale the entire series by dividing by s.
+        y_std[j, :] = y[j, :] ./ s
+    end
+    
+    return y_std, σʸ
+end
+
 
 end

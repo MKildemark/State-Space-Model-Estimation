@@ -20,11 +20,11 @@ Random.seed!(123)
 #########################
 #  Helper Check Positive definite
 #########################
-function positive_definite_check(θ, cycle_order, obs_dim)
+function positive_definite_check(θ, cycle_order, obs_dim, σʸ)
     if obs_dim == 1
         return true
     else
-        Z, H, T, R, Q, P_diffuse = state_space_model.state_space(θ, cycle_order)
+        Z, H, T, R, Q, P_diffuse = state_space_model.state_space(θ, cycle_order, σʸ)
         if isposdef(H) && isposdef(Q)
             return true
         else
@@ -86,19 +86,28 @@ function normal(θ, a, b)
 end
 
 function inverse_gamma(θ, a, b)
-    # a is shape and b is scale
+    # a is shape and b is scale; support (0, Inf)
+    if θ <= 0
+        return -Inf
+    end
     log_p = a*log(b) - lgamma(a) - (a+1)*log(θ) - b/θ
     return log_p
 end
 
 function beta(θ, a, b)
     # a is shape1 and b is shape2; support: (0,1)
+    if θ < 0 || θ > 1
+        return -Inf
+    end
     log_p = (a-1)*log(θ) + (b-1)*log(1-θ) - lgamma(a) - lgamma(b) + lgamma(a+b)
     return log_p
 end
 
 function uniform(θ, a, b)
     # bounded between a and b
+    if θ < a || θ > b
+        return -Inf
+    end
     log_p = -log(b - a)
     return log_p
 end
@@ -145,19 +154,22 @@ end
 #########################
 
 function priors(θ, prior_distributions, prior_parameters)
-    log_p = zeros(length(θ))
+    logp = 0
     for i in eachindex(θ)
         if prior_distributions[i] == "normal"
-            log_p[i] = normal(θ[i], prior_parameters[i, 1], prior_parameters[i, 2])
+            p = normal(θ[i], prior_parameters[i, 1], prior_parameters[i, 2])
         elseif prior_distributions[i] == "inverse_gamma"
-            log_p[i] = inverse_gamma(θ[i], prior_parameters[i, 1], prior_parameters[i, 2])
+            p = inverse_gamma(θ[i], prior_parameters[i, 1], prior_parameters[i, 2])
         elseif prior_distributions[i] == "beta"
-            log_p[i] = beta(θ[i], prior_parameters[i, 1], prior_parameters[i, 2])
+            p = beta(θ[i], prior_parameters[i, 1], prior_parameters[i, 2])
         elseif prior_distributions[i] == "uniform"
-            log_p[i] = uniform(θ[i], prior_parameters[i, 1], prior_parameters[i, 2])
+            p = uniform(θ[i], prior_parameters[i, 1], prior_parameters[i, 2])
         end
+
+        logp += p          
+
     end
-    return log_p
+    return logp
 end
 
 
@@ -165,14 +177,10 @@ end
 # Log Posterior
 #########################
 
-function log_posterior(θ, log_jac, prior_info, y, a1, P1, cycle_order)
+function log_posterior(θ, log_jac, prior_info, y, a1, P1, cycle_order, σʸ)
     # The likelihood is computed in a state-space context (using the Kalman filter)
-    log_lik = -neg_log_likelihood(θ, y, a1, P1, cycle_order)
-    log_prior = priors(θ, prior_info.distributions, prior_info.parameters)
-    log_pri = sum(log_prior)
-    if log_pri == -Inf || isnan(log_lik)
-        return -Inf
-    end
+    log_lik = -neg_log_likelihood(θ, y, a1, P1, cycle_order, σʸ)
+    log_pri = priors(θ, prior_info.distributions, prior_info.parameters)
     log_jacobian = sum(log_jac)
     return log_lik + log_jacobian + log_pri
 end
@@ -183,7 +191,7 @@ end
 # MCMC Estimation
 #########################
 
-function MCMC_estimation(y, prior_info, a1, P1, cycle_order;
+function MCMC_estimation(y, prior_info, a1, P1, cycle_order, σʸ;
               iter_init = 40000,
               burn_init = 5000,
               iter_rec = 10000,
@@ -200,12 +208,12 @@ function MCMC_estimation(y, prior_info, a1, P1, cycle_order;
     dim = size(prior_info.support, 1)
     θ_init_chain = zeros(iter_init, dim)
     Γ_chain = zeros(iter_init, dim)
-    obs_dim = size(y, 2)
+    obs_dim = size(y, 1)
 
     # Initialize in unbounded space
     Γ_current = transform_to_unbounded(θ_init, prior_info.support)
     θ_current, log_jac_current = transform_to_bounded(Γ_current, prior_info.support)
-    current_log_post = log_posterior(θ_current, log_jac_current, prior_info, y, a1, P1, cycle_order)
+    current_log_post = log_posterior(θ_current, log_jac_current, prior_info, y, a1, P1, cycle_order, σʸ)
     accept_init_total = 0
     block_accept_count = 0
     accept_target = (target_high+target_low)/2
@@ -216,9 +224,9 @@ function MCMC_estimation(y, prior_info, a1, P1, cycle_order;
         Γ_star = rand(MvNormal(Γ_current, ω * I(dim)))
         θ_star, log_jac_star = transform_to_bounded(Γ_star, prior_info.support)
         # Check if H and Q are postive definite else reject draw
-        positive_definite = positive_definite_check(θ_star, cycle_order, obs_dim)
+        positive_definite = positive_definite_check(θ_star, cycle_order, obs_dim, σʸ)
         if positive_definite
-            log_post_star = log_posterior(θ_star, log_jac_star, prior_info, y, a1, P1, cycle_order)
+            log_post_star = log_posterior(θ_star, log_jac_star, prior_info, y, a1, P1, cycle_order, σʸ)
             log_accept_ratio = log_post_star - current_log_post
             if log_accept_ratio > log(rand())
                 Γ_current = Γ_star
@@ -235,9 +243,7 @@ function MCMC_estimation(y, prior_info, a1, P1, cycle_order;
         # Adapt ω every adapt_interval iterations
         if mod(s, adapt_interval) == 0
             block_accept_rate = block_accept_count / adapt_interval
-            # if block_accept_rate < target_low || block_accept_rate > target_high
             ω *= exp((block_accept_rate - accept_target)/1)
-            # end
             block_accept_count = 0  # reset counter for next block
         end
         next!(pb)
@@ -248,6 +254,11 @@ function MCMC_estimation(y, prior_info, a1, P1, cycle_order;
     
     # Use the draws after burn-in to compute an empirical covariance for the unbounded parameters.
     Σ_emp = cov(Γ_chain[burn_init+1:end, :])
+    # check if Σ_emp is positive definite
+    if !isposdef(Σ_emp)
+        println("Empirical Covariance Matrix is not positive definite. Using identity matrix instead.")
+        Σ_emp = I(dim)
+    end
 
     #############################
     # Recursion Phase
@@ -255,14 +266,14 @@ function MCMC_estimation(y, prior_info, a1, P1, cycle_order;
     # Use the final draw from initialization as the starting value.
     Γ_current = Γ_chain[end, :]
     θ_current, log_jac_current = transform_to_bounded(Γ_current, prior_info.support)
-    current_log_post = log_posterior(θ_current, log_jac_current, prior_info, y, a1, P1, cycle_order)
+    current_log_post = log_posterior(θ_current, log_jac_current, prior_info, y, a1, P1, cycle_order, σʸ)
 
     n_params = dim
-    n_obs = size(y, 1)
+    n_obs = size(y, 2)
     state_dim = size(P1, 1)
 
     θ_chain = zeros(iter_rec, n_params)
-    α_draws = zeros(iter_rec, n_obs, state_dim)
+    α_draws = zeros(iter_rec, state_dim, n_obs)
     accept_rec_total = 0
     block_accept_count = 0  # for adaptive updates during recursion burn-in
 
@@ -272,9 +283,9 @@ function MCMC_estimation(y, prior_info, a1, P1, cycle_order;
         Γ_star = rand(MvNormal(Γ_current, ω * Σ_emp))
         θ_star, log_jac_star = transform_to_bounded(Γ_star, prior_info.support)
         # Check if H and Q are postive definite else auto reject draw
-        positive_definite = positive_definite_check(θ_star, cycle_order, obs_dim)
+        positive_definite = positive_definite_check(θ_star, cycle_order, obs_dim, σʸ)
         if positive_definite
-            log_post_star = log_posterior(θ_star, log_jac_star, prior_info, y, a1, P1, cycle_order)
+            log_post_star = log_posterior(θ_star, log_jac_star, prior_info, y, a1, P1, cycle_order, σʸ)
             log_accept_ratio = log_post_star - current_log_post
 
             if log_accept_ratio > log(rand())
@@ -292,7 +303,7 @@ function MCMC_estimation(y, prior_info, a1, P1, cycle_order;
         # After burn-in, draw state trajectories using the simulation smoother.
         if s > burn_rec
             _, α_samp, _ = diffuse_kalman_filter(
-                y, θ_current, a1, P1, cycle_order,
+                y, θ_current, a1, P1, cycle_order, σʸ,
                 true, true
             )
             α_draws[s, :, :] = α_samp
@@ -301,9 +312,7 @@ function MCMC_estimation(y, prior_info, a1, P1, cycle_order;
         # Adapt ω every adapt_interval iterations.
         if mod(s, adapt_interval) == 0
             block_accept_rate = block_accept_count / adapt_interval
-            # if block_accept_rate < target_low || block_accept_rate > target_high
             ω *= exp((block_accept_rate - accept_target)/1)
-            # end
             block_accept_count = 0
         end
         next!(pb)

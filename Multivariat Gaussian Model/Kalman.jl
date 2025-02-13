@@ -33,193 +33,175 @@ function rand_draw(dim, Σ)
 end
 
 
-#########################
-#  Diffuse Kalman Filter 
-#########################
-function diffuse_kalman_filter(y, θ, α1, P1, cycle_order, do_smooth, do_sim_smooth, diffuse_tol = 1e-6)
-    Z, H, T, R, Q, P_diffuse = state_space(θ, cycle_order)
+
+function diffuse_kalman_filter(y, θ, α1, P1, cycle_order, σʸ, do_smooth, do_sim_smooth, F_tol = 1e-8)
+
+
+    # Get state-space matrices
+    Z, H, T, R, Q, P_diffuse = state_space(θ, cycle_order, σʸ)
 
     # Dimensions:
-    #   Z is (obs_dim, state_dim) 
-    #   H is (obs_dim,obs_dim),
-    #   T is (state_dim,state_dim), etc.
-    #   R is (state_dim,shock_dim)
-    #   Q is (shock_dim,shock_dim)
-    n_obs    = size(y, 1)
+    n_obs    = size(y, 2)
     state_dim = size(T, 1)
-    obs_dim   = size(Z, 1)
-    
+    obs_dim   = size(y, 1)
+    m = n_obs
+    k = state_dim
+    n = obs_dim
+
     # Preallocate arrays for filtered states and covariances.
-    α_f = zeros(n_obs, state_dim)           # filtered state estimates
-    P_f = Vector{Matrix{Float64}}(undef, n_obs)  # filtered state covariances
-    P_diff_f = Vector{Matrix{Float64}}(undef, n_obs)  # filtered state covariances for diffuse part
+    α_f = zeros(k, m)           # filtered state estimates
+    P_f = zeros(k, k, m)        # filtered state covariances
+    P_diff_f = zeros(k, k, m)   # filtered covariances for the diffuse part
 
     if do_smooth
-        α_s = zeros(n_obs, state_dim)           # smoothed state estimates
-        P_s = Vector{Matrix{Float64}}(undef, n_obs)  # smoothed state covariances
-        v_f = zeros(n_obs, obs_dim)             # filtered innovations
-        F_f = zeros(n_obs, obs_dim)             # filtered innovation variances
-        K_f = zeros(n_obs, obs_dim, state_dim)  # filtered Kalman gains
-        F_diff_f = zeros(n_obs, obs_dim)      # filtered F_diff
-        K_diff_f = zeros(n_obs, obs_dim, state_dim)  # filtered Kalman gains for F_diff
+        α_s = zeros(k, m)       # smoothed state estimates
+        P_s = zeros(k, k, m)    # smoothed state covariances
+        v_f = zeros(m, n)       # filtered innovations
+        F_f = zeros(m, n)       # filtered innovation variances
+        K_f = zeros(k, n, m)    # filtered Kalman gains
+        F_diff_f = zeros(m, n)  # filtered innovation variances for diffuse part
+        K_diff_f = zeros(k, n, m) # filtered gains for diffuse part
     end
 
-
     # --- Transformation if H is not diagonal ---
-    # Check if H is (exactly) diagonal
     if size(H,1) > 1
-        # Check if H is diagonal
         if !isdiag(H)
-            # Schur decomposition
-            Λ,M  = schur(H)
+            Λ, M = schur(H)
             y = y * M
             Z = M' * Z
             H = Λ
         end
     end
-    # --- End transformation ---
 
-    # --- Initialize ---
+    # --- Initialize filter ---
     P_diff = P_diffuse
-    # Set variance off the diffuse parts to zero
-    P1[P_diff .==1].=0
+    # Set variances off the diffuse parts to zero.
+    P1[P_diffuse .== 1] .= 0
     P = P1
     α = α1
-    
-    α_f[1, :] = α
-    P_f[1] = P
-    P_diff_f[1] = P_diffuse
+
+    α_f[:,1] = α
+    P_f[:,:,1] = P
+    P_diff_f[:,:,1] = P_diffuse
     LogL = 0.0
 
-
-
-    # ---- Simulation smoother data series  Koopman (2002) ----
+    # ---- Simulation smoother (if enabled) ----
     if do_sim_smooth 
-        α⁺ = zeros(n_obs, state_dim)
-        y⁺ = zeros(n_obs, obs_dim)
-
-        for t in 1:n_obs
-            # first period draw α⁺ from N(0,P1)
+        α⁺ = zeros(k, m)
+        y⁺ = zeros(n, m)
+        for t in 1:m
             if t == 1
-                α⁺[t, :] = rand_draw(state_dim, P1) #How to handle diffuse here? Now variance of diffuse states is zero
+                α⁺[:,t] = rand_draw(k, P1)
             else
                 η = rand(MvNormal(zeros(size(Q,1)), Q))
-                α⁺[t, :] = T * α⁺[t-1, :] + R * η 
+                α⁺[:,t] = T * α⁺[:, t-1] + R * η 
             end
-            ε = rand(MvNormal(zeros(obs_dim), H))
-            y⁺[t, :] = Z * α⁺[t, :] + ε 
+            ε = rand(MvNormal(zeros(n), H))
+            y⁺[:, t] = Z * α⁺[:,t] + ε 
         end
+        # Subtract the simulation smoother draws from the data.
         y = y - y⁺
     end
 
-
-
-    # --- Univariate (sequential) Kalman Filter (Durbin & Koopman 2000)  ---
-    for t in 1:n_obs
-        for i in 1:obs_dim
-
-            # Compute the prediction error variance (a scalar):
+    # --- Univariate (sequential) Kalman Filter ---
+    for t in 1:m
+        for i in 1:n
+            # Compute prediction error variance (scalar)
             F = Z[i, :]' * P * Z[i, :] + H[i, i]
             F_diff = Z[i, :]' * P_diff * Z[i, :]
-            # Compute the Kalman gain (a column vector):
-            K = P * Z[i, :]
-            K_diff = P_diff * Z[i, :]
-            # Compute the innovation (measurement residual)
-            v = y[t, i] - dot(Z[i, :], α)
+            if F > F_tol || F_diff > F_tol
+                # Compute gains and innovation
+                K = P * Z[i, :]
+                K_diff = P_diff * Z[i, :]
+                v = y[i, t] - dot(Z[i, :], α)
 
-            # --- Update state and covariance and increment likelihood ---
-            if F_diff < diffuse_tol # usual Kalman filter
-                α = α + K * (v / F)
-                P = P - K * (K' / F)
-                LogL += -0.5 * (log(2π) + log(F) + (v^2)/F)
-            else # diffuse Kalman filter
-                α = α + K_diff / F_diff * v
-                P = P + K_diff * K_diff' * F / (F_diff^2) - (K*K_diff' + K_diff*K') / F_diff
-                P_diff = P_diff - K_diff * K_diff' / F_diff
-                LogL += -0.5 * (log(2π) + log(F_diff))
-            end 
-        
-            if do_smooth  #store results for smoother
-                v_f[t, i] = v
-                F_f[t, i] = F
-                K_f[t, i, :] = K
-                F_diff_f[t, i] = F_diff
-                K_diff_f[t, i, :] = K_diff
+                # --- Update state (using the diffuse update if F_diff is “active”) ---
+                if F_diff > F_tol
+                    # Diffuse Kalman update (matching second filter’s logic)
+                    α = α + (K_diff / F_diff) * v
+                    P = P + (K_diff * K_diff' * F) / (F_diff^2) - (K * K_diff' + K_diff * K') / F_diff
+                    P_diff = P_diff - (K_diff * K_diff') / F_diff
+                    LogL += -0.5 * (log(2π) + log(F_diff))
+                else
+                    # Standard Kalman update
+                    α = α + K * (v / F)
+                    P = P - K * (K' / F)
+                    LogL += -0.5 * (log(2π) + log(F) + (v^2)/F)
+                end
+
+                if do_smooth
+                    v_f[t, i] = v
+                    F_f[t, i] = F
+                    K_f[:, i, t] = K
+                    F_diff_f[t, i] = F_diff
+                    K_diff_f[:, i, t] = K_diff
+                end
             end
-          
         end
-
-        # --- Prediction step ---
-        α = T * α
-        P = T * P * T' + R * Q * R'
-        P_diff = T * P_diff * T'
-
-
-
-        # Store filtered estimates (for t < n_obs, we store the prediction for the next time step)
-        if t < n_obs
-            α_f[t+1, :] = α
-            P_f[t+1] = P
-            P_diff_f[t+1] = P_diff
+        # Prediction step (done once per time period, after all observations at t)
+        if t < m
+            α = T * α
+            P = T * P * T' + R * Q * R'
+            P_diff = T * P_diff * T'
+            α_f[:, t+1] = α
+            P_f[:, :, t+1] = P
+            P_diff_f[:, :, t+1] = P_diff
         end
     end
 
-
-
-    # --- Diffuse Kalman Smoother  (Durbin & Koopman 2000)---
+    # --- Diffuse Kalman Smoother ---
     if do_smooth
-        # Initialize r and N:
-        # double the state dimension to accommodate both usual and diffuse parts
-        r = zeros(2*state_dim)
-        N = zeros(2*state_dim, 2*state_dim)
+        # Initialize r and N (dimension doubled to accommodate the diffuse part)
+        r = zeros(2*k)
+        N = zeros(2*k, 2*k)
         TT = kron(Matrix(I,2,2), T)
 
-        # backwards recursion
-        #backwards through time
-        for t=n_obs:-1:1
-            if t < n_obs
+        # Backward recursion (time)
+        for t in m:-1:1
+            if t < m
                 r = TT' * r
                 N = TT' * N * TT
             end
 
-            #backwards through states
-            for i=obs_dim:-1:1
-                
-                K = K_f[t, i, :]
-                F = F_f[t, i]
-                v = v_f[t, i]
-                K_diff = K_diff_f[t, i, :]
-                F_diff = F_diff_f[t, i]
+            # Backward recursion over measurement equations
+            for i in n:-1:1
+                F_val = F_f[t, i]
+                F_diff_val = F_diff_f[t, i]
+                if F_val > F_tol || F_diff_val > F_tol
+                    v_val = v_f[t, i]
+                    K_val = K_f[:, i, t]
+                    K_diff_val = K_diff_f[:, i, t]
+                    if F_diff_val > F_tol
+                        # Diffuse smoother update
+                        L = (K_diff_val * F_val / F_diff_val - K_val) * (Z[i, :]'/F_diff_val)
+                        L_diff = Matrix(I, k, k) - K_diff_val * (Z[i, :]'/F_diff_val)
+                        M = [L_diff  L; zeros(size(L_diff))  L_diff]
 
-                if F_diff_f[t, i] < diffuse_tol  # usual Kalman smoother
-                    L = Matrix(I, state_dim, state_dim) - K * Z[i, :]' / F
-                    M = [L zeros(size(L)); zeros(size(L)) L]
+                        r = [zeros(k); (Z[i, :]/F_diff_val)*v_val] + M' * r
+                        x = (Z[i, :]/F_diff_val) * Z[i, :]'
+                        y_block = (Z[i, :]/(F_diff_val^2)) * Z[i, :]' * F_val
+                        N = [zeros(k, k)  x; x  y_block] + M' * N * M
+                    else
+                        # Standard smoother update
+                        L = Matrix(I, k, k) - K_val * (Z[i, :]'/F_val)
+                        M = [L  zeros(k, k); zeros(k, k)  L]
 
-                    r = [Z[i,:]/F*v;zeros(state_dim)] + M' * r
-                    N = [Z[i,:]/F*Z[i,:]'  zeros(state_dim,state_dim) ; zeros(state_dim, 2* state_dim)] + M' * N * M
-
-                else  # diffuse Kalman smoother
-                    L = (K_diff * F / F_diff - K) * Z[i,:]' / F_diff
-                    L_diff = Matrix(I, state_dim, state_dim) - K_diff * Z[i,:]' / F_diff
-                    M = [L_diff L; zeros(size(L)) L_diff]
-
-                    r = [zeros(state_dim); Z[i,:]/F_diff*v] + M' * r
-                    x = Z[i,:]/F_diff*Z[i,:]'
-                    y = Z[i,:]/(F_diff^2)*Z[i,:]'*F
-                    N = [zeros(state_dim, state_dim) x ; x  y] + M' * N * M
+                        r = [(Z[i, :]/F_val)*v_val; zeros(k)] + M' * r
+                        N = [(Z[i, :]/F_val)*Z[i, :]'  zeros(k, k);
+                             zeros(k, 2*k)] + M' * N * M
+                    end
                 end
             end
-        
-            # smoothed state and covariance
-            P_dagger = [P_f[t] P_diff_f[t]]
-            α_s[t, :] = α_f[t, :] + P_dagger * r
-            P_s[t] = P_f[t] - P_dagger * N * P_dagger'
+
+            # Smoothed state and covariance
+            P_dagger = [P_f[:, :, t]  P_diff_f[:, :, t]]
+            α_s[:, t] = α_f[:, t] + P_dagger * r
+            P_s[:, :, t] = P_f[:, :, t] - P_dagger * N * P_dagger'
         end
     end
 
-    # --- States and covariances ---
+    # --- Return states and covariances ---
     if do_sim_smooth
-        # Get sate draws from the simulation smoother (Koopman 2002)
         α = α_s + α⁺
         P = P_s
     elseif do_smooth
@@ -231,16 +213,21 @@ function diffuse_kalman_filter(y, θ, α1, P1, cycle_order, do_smooth, do_sim_sm
     end
 
     return LogL, α, P
-
 end
+
+
+
+
+
+
 
 
 #########################
 # Negative Likelihood for MLE
 #########################
 
-function neg_log_likelihood(θ, y,  α0 , P0, cycle_order)
-    LogL, _, _ = diffuse_kalman_filter(y,θ,α0, P0, cycle_order, false, false)
+function neg_log_likelihood(θ, y,  α0 , P0, cycle_order, σʸ)
+    LogL, _, _ = diffuse_kalman_filter(y,θ,α0, P0, cycle_order, σʸ, false, false)
     return -LogL
 end
 
