@@ -15,6 +15,7 @@ Random.seed!(123)
 # Univariat State-Space
 #########################
 function uni_state_space(θ, cycle_order, σʸ)
+
     # Parameter vector for the univariate model:
     #   θ = [ ρ, λ_c, σ_ε, σ_ξ, σ_κ ]
     ρ     = θ[1]
@@ -22,6 +23,7 @@ function uni_state_space(θ, cycle_order, σʸ)
     σ_ε   = θ[3]
     σ_ξ   = θ[4]
     σ_κ   = θ[5]
+    σʸ = σʸ[1]
 
     # The state vector is defined as:
     #   [ u_t, β_t, ψ_{2,t}, ψ_{2,t}*, ψ_{1,t}, ψ_{1,t}* ]
