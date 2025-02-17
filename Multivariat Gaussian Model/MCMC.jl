@@ -1,6 +1,6 @@
 module MCMC
 
-export MCMC_estimation
+export MCMC_estimation, PMCMC_estimation
 
 using Random
 using LinearAlgebra
@@ -156,7 +156,7 @@ function neg_log_likelihood(θ, y, a1, P1, cycle_order, σʸ; filter_type="kalma
         LogL, _, _ = diffuse_kalman_filter(y, θ, a1, P1, cycle_order, σʸ, false, false)
         return -LogL
     elseif filter_type == "particle"
-        logL, _ = ParticleFilter.particle_filter(y, θ, a1, P1, cycle_order, σʸ; N_particles=1000)
+        logL, _ =particle_filter(y, θ, a1, P1, cycle_order, σʸ; N_particles=2000)
         return -logL
     else
         error("Unknown filter type: $filter_type")
@@ -204,12 +204,12 @@ end
 function MCMC_estimation(y, prior_info, a1, P1, cycle_order, σʸ;
               filter_type="kalman",
               iter_init = 20000,
-              burn_init = 1000,
+              burn_init = 10000,
               iter_rec = 20000,
               burn_rec =15000,
               θ_init = zeros(size(prior_info.support, 1)),
-              ω = 0.1,
-              adapt_interval = 100,
+              ω = 0.01,
+              adapt_interval = 50,
               target_low = 0.25,
               target_high = 0.35)
 
@@ -222,7 +222,8 @@ function MCMC_estimation(y, prior_info, a1, P1, cycle_order, σʸ;
     obs_dim = size(y, 1)
 
     # Initialize in unbounded space
-    Γ_current = transform_to_unbounded(θ_init, prior_info.support)
+    # Γ_current = transform_to_unbounded(θ_init, prior_info.support)
+    Γ_current = θ_init
     θ_current, log_jac_current = transform_to_bounded(Γ_current, prior_info.support)
     current_log_post = log_posterior(θ_current, log_jac_current, prior_info, y, a1, P1, cycle_order, σʸ;
                                      filter_type=filter_type)
@@ -238,7 +239,7 @@ function MCMC_estimation(y, prior_info, a1, P1, cycle_order, σʸ;
         # Check if H and Q are positive definite; else reject draw.
         if positive_definite_check(θ_star, cycle_order, obs_dim, σʸ)
             log_post_star = log_posterior(θ_star, log_jac_star, prior_info, y, a1, P1, cycle_order, σʸ;
-                                          filter_type=filter_type)
+                                            filter_type=filter_type)
             log_accept_ratio = log_post_star - current_log_post
             if log_accept_ratio > log(rand())
                 Γ_current = Γ_star
@@ -255,7 +256,11 @@ function MCMC_estimation(y, prior_info, a1, P1, cycle_order, σʸ;
         # Adapt ω every adapt_interval iterations
         if mod(s, adapt_interval) == 0
             block_accept_rate = block_accept_count / adapt_interval
+       
             ω *= exp((block_accept_rate - accept_target)/1)
+            println(ω)
+            println(block_accept_rate)
+           
             block_accept_count = 0  # reset counter for next block
         end
         next!(pb)
@@ -320,7 +325,7 @@ function MCMC_estimation(y, prior_info, a1, P1, cycle_order, σʸ;
                 )
             elseif filter_type == "particle"
                 _, α_samp = ParticleFilter.particle_filter(
-                    y, θ_current, a1, P1, cycle_order, σʸ; N_particles=1000
+                    y, θ_current, a1, P1, cycle_order, σʸ; N_particles=2000
                 )
             end
             α_draws[s, :, :] = α_samp
@@ -328,7 +333,9 @@ function MCMC_estimation(y, prior_info, a1, P1, cycle_order, σʸ;
 
         if mod(s, adapt_interval) == 0
             block_accept_rate = block_accept_count / adapt_interval
+
             ω *= exp((block_accept_rate - accept_target)/1)
+        
             block_accept_count = 0
         end
         next!(pb)
@@ -343,5 +350,65 @@ function MCMC_estimation(y, prior_info, a1, P1, cycle_order, σʸ;
 
     return θ_chain_post, θ_init_chain, α_draws_post
 end
+
+
+
+
+#########################
+# PMCMC Estimation
+#########################
+
+function PMCMC_estimation(y, initial_param, n_iterations, cycle_order, σy, a1, P1, proposal_cov, prior_info; N_particles=1000)
+    # Initialize the unbounded parameter vector and transform to the bounded (original) space.
+    # initial_Γ = transform_to_unbounded(initial_param, prior_info.support)
+    initial_Γ = initial_param
+    current_Γ = copy(initial_param)
+    current_θ, current_log_jac = transform_to_bounded(current_Γ, prior_info.support)
+    # Evaluate the log posterior using the particle filter for likelihood computation.
+    current_log_post = log_posterior(current_θ, current_log_jac, prior_info, y, a1, P1, cycle_order, σy;
+                                     filter_type="particle")
+
+    d = length(initial_Γ)
+    chain_Γ = zeros(n_iterations, d)               # Unbounded parameter chain
+    chain_θ = zeros(n_iterations, length(current_θ)) # Bounded (original) parameter chain
+    log_posts = zeros(n_iterations)
+    accepted = 0
+
+    # Store the initial values.
+    chain_Γ[1, :] = current_Γ
+    chain_θ[1, :] = current_θ
+    log_posts[1] = current_log_post
+
+    @showprogress 1 "PMCMC sampling..." for iter in 2:n_iterations
+        # Propose new unbounded parameters (random walk)
+        proposal = rand(MvNormal(zeros(d), proposal_cov))
+        proposed_Γ = current_Γ + proposal
+        # Transform proposed parameters to their original bounded space.
+        proposed_θ, proposed_log_jac = transform_to_bounded(proposed_Γ, prior_info.support)
+        # Compute the log posterior for the proposal using the particle filter.
+        proposed_log_post = log_posterior(proposed_θ, proposed_log_jac, prior_info, y, a1, P1, cycle_order, σy;
+                                          filter_type="particle")
+
+        # Calculate the log acceptance ratio.
+        log_alpha = proposed_log_post - current_log_post
+
+        # Accept/reject step.
+        if log(rand()) < log_alpha
+            current_Γ = proposed_Γ
+            current_θ = proposed_θ
+            current_log_post = proposed_log_post
+            accepted += 1
+        end
+
+        # Store the current (possibly updated) parameters.
+        chain_Γ[iter, :] = current_Γ
+        chain_θ[iter, :] = current_θ
+        log_posts[iter] = current_log_post
+    end
+
+    acceptance_rate = accepted / (n_iterations - 1)
+    return chain_θ, chain_Γ, log_posts, acceptance_rate
+end
+
 
 end  # module MCMC

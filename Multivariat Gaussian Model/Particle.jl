@@ -1,100 +1,128 @@
 module ParticleFilter
 
-export particle_filter, particle_filter_all_states
+export particle_filter
 
 using Random
-using Distributions
 using LinearAlgebra
-using StatsBase
-
+using Statistics
+using Distributions
 
 include("State_Space_Model.jl")
 using .state_space_model
 
-"""
-    particle_filter(y, θ, a1, P1, cycle_order, σy; N_particles=1000)
 
-Runs a particle filter for the univariate state-space model defined in
-`state_space_model.state_space`. Here:
-
-- `y` is the observed data (an array or 1×T matrix).
-- `θ` is the parameter vector (e.g. [ρ, λ_c, σ_ε, σ_ξ, σ_κ]).
-- `a1` and `P1` are the initial state mean and covariance.
-- `cycle_order` is the number of cycle blocks in the state.
-- `σy` is the scaling used in the measurement equation.
-- `N_particles` is the number of particles.
-
-It returns a tuple `(log_likelihood, filtered_state)` where `filtered_state`
-is the matrix of filtered state estimates (each column corresponds to a time step).
-"""
-function particle_filter(y, θ, a1, P1, cycle_order, σy; N_particles=1000)
-    # Get the system matrices from the state-space model.
-    # state_space returns: (Z, H, T, R, Q)
-    Z, H, T_mat, R, Q = state_space(θ, cycle_order, σy)
-    
-    # Dimensions
-    T_total = size(y, 2)
-    state_dim = length(a1)
-    
-    # Initialize particles: each column is one particle state vector.
-    particles = zeros(state_dim, N_particles)
-    for i in 1:N_particles
-        particles[:, i] = a1 + rand(MvNormal(P1))
-    end
-    
-    # Initialize weights and filtered state storage.
-    weights = zeros(N_particles)
-    filtered_state = zeros(state_dim, T_total)
-    log_likelihood = 0.0
-    
-    # --- Time 1: Weight the initial particles ---
-    for i in 1:N_particles
-        # The observation is given by y[:,1] ~ N(Z * α, H).
-        mean_obs = Z * particles[:, i]
-        # Here we assume H is 1×1; for multivariate you could use MvNormal(mean_obs, H)
-        weights[i] = pdf(Normal(mean_obs[1], H[1,1]), y[1,1])
-    end
-    wsum = sum(weights)
-    if wsum == 0
-        weights .= 1/N_particles
-    else
-        weights ./= wsum
-    end
-    log_likelihood += log(wsum / N_particles)
-    filtered_state[:, 1] = particles * weights
-
-    # --- Recursion: t = 2, …, T_total ---
-    for t in 2:T_total
-        # Resample particles based on previous weights:
-        indices = sample(1:N_particles, Weights(weights), N_particles, replace=true)
-        new_particles = zeros(size(particles))
-        for i in 1:N_particles
-            idx = indices[i]
-            particle_prev = particles[:, idx]
-            # Propagate the state:
-            #   αₜ = T * αₜ₋₁ + R * ηₜ   with ηₜ ~ N(0, Q)
-            new_particles[:, i] = T_mat * particle_prev + R * rand(MvNormal(zeros(size(Q,1)), Q))
+# A helper function for systematic resampling.
+function systematic_resample(weights::Vector{Float64})
+    N = length(weights)
+    positions = ((0:N-1) .+ rand()) / N
+    cumulative_sum = cumsum(weights)
+    indices = Vector{Int}(undef, N)
+    i = 1
+    j = 1
+    while i ≤ N && j ≤ N
+        if positions[i] < cumulative_sum[j]
+            indices[i] = j
+            i += 1
+        else
+            j += 1
         end
-        particles = new_particles
+    end
+    return indices
+end
 
-        # Compute weights based on the measurement equation at time t.
+
+function particle_filter(y, θ, a1, P1, cycle_order, σy; N_particles=1000)
+    # Retrieve the state-space matrices from your model.
+    Z, H, T_mat, R_mat, Q, _ = state_space(θ, cycle_order, σy)
+    state_dim = size(T_mat, 1)
+    T_obs = size(y, 2)
+
+    # Initialize particles at time 1.
+    particles = zeros(state_dim, N_particles)
+    if norm(P1) < 1e-12
+        for i in 1:N_particles
+            particles[:, i] .= a1
+        end
+    else
+        for i in 1:N_particles
+            particles[:, i] = a1 + rand(MvNormal(zeros(state_dim), P1))
+        end
+    end
+
+    # Initialize uniform weights.
+    weights = fill(1.0 / N_particles, N_particles)
+
+    # For smoothing: store ancestor indices and the full set of particles.
+    ancestors = Array{Int}(undef, T_obs, N_particles)
+    ancestors[1, :] .= 0  # No ancestors for t = 1.
+    particles_all = Vector{Matrix{Float64}}(undef, T_obs)
+    particles_all[1] = copy(particles)
+
+    logL = 0.0  # Log-likelihood accumulator
+
+    # --- Time 1: weight particles based on the first observation ---
+    for i in 1:N_particles
+        mean_obs = Z * particles[:, i]
+        weights[i] = pdf(MvNormal(mean_obs, H), y[:, 1])
+    end
+    weight_sum = sum(weights)
+    if weight_sum == 0
+        return -Inf, zeros(state_dim, T_obs)
+    end
+    weights /= weight_sum
+    logL += log(weight_sum / N_particles)
+    idxs = systematic_resample(weights)
+    # For time 1 there is no meaningful ancestor; we keep zeros.
+    particles = particles[:, idxs]
+    particles_all[1] = copy(particles)
+    weights .= 1.0 / N_particles
+
+    # --- Time steps 2 to T_obs ---
+    for t in 2:T_obs
+        # Propagate each particle using the state transition.
+        # (Since we resample at every step, the particle order is preserved.)
+        for i in 1:N_particles
+            η = rand(MvNormal(zeros(size(Q, 1)), Q))
+            particles[:, i] = T_mat * particles[:, i] + R_mat * η
+        end
+        particles_all[t] = copy(particles)
+
+        # Compute the weights given observation y[:, t].
         for i in 1:N_particles
             mean_obs = Z * particles[:, i]
-            weights[i] = pdf(Normal(mean_obs[1], H[1,1]), y[1, t])
+            weights[i] = pdf(MvNormal(mean_obs, H), y[:, t])
         end
-        wsum = sum(weights)
-        if wsum == 0
-            weights .= 1/N_particles
-        else
-            weights ./= wsum
+        weight_sum = sum(weights)
+        if weight_sum == 0
+            return -Inf, zeros(state_dim, T_obs)
         end
-        log_likelihood += log(wsum / N_particles)
+        weights /= weight_sum
+        logL += log(weight_sum / N_particles)
 
-        # Filtered state is the weighted average of particles.
-        filtered_state[:, t] = particles * weights
+        # Resample and record the ancestor indices.
+        idxs = systematic_resample(weights)
+        ancestors[t, :] = idxs  # For each new particle, store its parent's index.
+        particles = particles[:, idxs]
+        particles_all[t] = copy(particles)
+        weights .= 1.0 / N_particles
     end
 
-    return log_likelihood, filtered_state
+    # --- Backward Simulation: sample one trajectory from the smoothing distribution ---
+    trajectory = zeros(state_dim, T_obs)
+    # At the final time step, select an index uniformly.
+    idx = rand(1:N_particles)
+    trajectory[:, T_obs] = particles_all[T_obs][:, idx]
+    for t in (T_obs - 1):-1:1
+        # For t = 1, ancestors[t+1, idx] is zero so we simply use the particle from time 1.
+        if t == 1
+            trajectory[:, t] = particles_all[t][:, max(idx, 1)]
+        else
+            idx = ancestors[t + 1, idx]
+            trajectory[:, t] = particles_all[t][:, idx]
+        end
+    end
+
+    return logL, trajectory
 end
 
-end
+end  # module ParticleFilter
