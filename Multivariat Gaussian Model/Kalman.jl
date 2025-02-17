@@ -1,7 +1,6 @@
 module kalman
 
-export kalman_filter, kalman_smoother,
-       neg_log_likelihood, diffuse_kalman_filter
+export diffuse_kalman_filter
 
 using Random
 using LinearAlgebra
@@ -214,27 +213,6 @@ function diffuse_kalman_filter(y, θ, α1, P1, cycle_order, σʸ, do_smooth, do_
 
     return LogL, α, P
 end
-
-
-
-
-
-
-
-
-#########################
-# Negative Likelihood for MLE
-#########################
-
-function neg_log_likelihood(θ, y,  α0 , P0, cycle_order, σʸ)
-    LogL, _, _ = diffuse_kalman_filter(y,θ,α0, P0, cycle_order, σʸ, false, false)
-    return -LogL
-end
-
-
-
-
-
 
 
 

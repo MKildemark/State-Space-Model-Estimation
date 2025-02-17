@@ -14,8 +14,8 @@ Random.seed!(123)
 #########################
 # Univariat State-Space
 #########################
-function uni_state_space(θ, cycle_order, σʸ)
 
+function uni_state_space(θ, cycle_order, σʸ)
     # Parameter vector for the univariate model:
     #   θ = [ ρ, λ_c, σ_ε, σ_ξ, σ_κ ]
     ρ     = θ[1]
@@ -23,28 +23,25 @@ function uni_state_space(θ, cycle_order, σʸ)
     σ_ε   = θ[3]
     σ_ξ   = θ[4]
     σ_κ   = θ[5]
-    σʸ = σʸ[1]
+    σʸ   = σʸ[1]
 
-    # The state vector is defined as:
-    #   [ u_t, β_t, ψ_{2,t}, ψ_{2,t}*, ψ_{1,t}, ψ_{1,t}* ]
-    state_dim = 2 + 2*cycle_order
+    # Total state dimension: 2 for trend (u_t and β_t) and 2 for each cycle block.
+    state_dim = 2 + 2 * cycle_order
 
     ##########################
     # 1. Measurement Equation
     ##########################
-    # y_t = u_t + ψ_{2,t} + ε_t, with ε_t ~ N(0, σ_ε)
-    # Z selects u_t (state[1]) and ψ_{2,t} (state[3])
+    # The observation equation is:
+    #   y_t = u_t + ψ_{max,t} + ε_t
+    # where u_t is the first state and ψ_{max,t} is the cosine-part of the highest cycle order.
     Z = zeros(1, state_dim)
-    Z[1, 1] = 1      # u_t
-    Z[1, 3] = 1      # ψ_{2,t}
-    # rescale 
-
+    Z[1, 1] = 1       # u_t
+    Z[1, 3] = 1       # ψ_{max,t} (the first element in the first cycle block)
+    # rescale
     Z = Z ./ σʸ
 
-    # Measurement error covariance 
-    H = [σ_ε/(σʸ^2)]
-    
-    
+    # Measurement error covariance:
+    H = [σ_ε / (σʸ^2)]
 
     ##########################
     # 2. Transition Equation
@@ -52,47 +49,71 @@ function uni_state_space(θ, cycle_order, σʸ)
     T = zeros(state_dim, state_dim)
     # -- Trend equations --
     # u_t = u_{t-1} + β_{t-1}
-    T[1, 1] = 1;  T[1, 2] = 1
-    # β_t = β_{t-1} + ξ_t
+    T[1, 1] = 1;   T[1, 2] = 1
+    # β_t = β_{t-1}  (plus shock later)
     T[2, 2] = 1
 
-    # -- Second-order cycle for ψ_{2,t} and ψ_{2,t}* --
-    # ψ_{2,t}   = ρcosλ_c·ψ_{2,t-1} + ρsinλ_c·ψ_{2,t-1}* + ψ_{1,t-1}
-    T[3, 3] = ρ*cos(λ_c);  T[3, 4] = ρ*sin(λ_c);  T[3, 5] = 1
-    # ψ_{2,t}*  = -ρsinλ_c·ψ_{2,t-1} + ρcosλ_c·ψ_{2,t-1}* + ψ_{1,t-1}*
-    T[4, 3] = -ρ*sin(λ_c); T[4, 4] = ρ*cos(λ_c);  T[4, 6] = 1
+    # -- Cycle equations --
+    # We will fill in the cycle transitions block-by-block.
+    #
+    # The cycle part of the state is arranged as blocks:
+    # Block 1 (states 3-4): highest cycle order (ψ_{max,t}, ψ^*_{max,t})
+    # Block 2 (states 5-6): next cycle order, etc.
+    #
+    # For block i (i = 1,...,cycle_order) the update is:
+    #   [ψ_{i,t}; ψ_{i,t}^*] = ρ R(λ_c)[ψ_{i,t-1}; ψ_{i,t-1}^*] +
+    #         { [ψ_{i-1,t-1}; ψ_{i-1,t-1}^*] if i > 1, else [κ_t; κ^*_t] }
+    #
+    # Note: In our state vector, block 1 corresponds to the highest order,
+    #       so we loop i = 1,...,cycle_order in order.
+    #
+    # Let idx_i be the starting index for block i:
+    #   idx_i = 2 + 2*(i-1) + 1.
+    #
+    for i in 1:cycle_order
+        idx = 2 + 2*(i-1) + 1       # starting index of block i
+        # Set the 2x2 rotation part:
+        T[idx,     idx]     = ρ * cos(λ_c)
+        T[idx,     idx+1]   = ρ * sin(λ_c)
+        T[idx+1,   idx]     = -ρ * sin(λ_c)
+        T[idx+1,   idx+1]   = ρ * cos(λ_c)
 
-    # -- First-order cycle for ψ_{1,t} and ψ_{1,t}* --
-    # ψ_{1,t}  = ρcosλ_c·ψ_{1,t-1} + ρsinλ_c·ψ_{1,t-1}* + κ_t
-    T[5, 5] = ρ*cos(λ_c);  T[5, 6] = ρ*sin(λ_c)
-    # ψ_{1,t}* = -ρsinλ_c·ψ_{1,t-1} + ρcosλ_c·ψ_{1,t-1}* + κ_t^*
-    T[6, 5] = -ρ*sin(λ_c); T[6, 6] = ρ*cos(λ_c)
+        # For blocks i=1,...,cycle_order-1 (i.e. not the lowest order), add the next block:
+        if i < cycle_order
+            next_idx = idx + 2
+            T[idx,     next_idx]   = 1   # adds ψ from lower-order block
+            T[idx+1,   next_idx+1] = 1
+        end
+    end
 
     ##########################
     # 3. Selection and Process Noise
     ##########################
-    # The shocks:
-    #   ξ_t   affects β_t (second state)
-    #   κ_t   affects ψ_{1,t} (fifth state)
-    #   κ_t^* affects ψ_{1,t}* (sixth state)
+    # The model has three shocks:
+    #   - ξ_t (trend drift shock) enters β_t (state 2)
+    #   - κ_t and κ^*_t (cycle shocks) enter the lowest cycle block (block with i = cycle_order)
+    #
+    # Build the selection matrix R (state_dim x 3):
     R = zeros(state_dim, 3)
     R[2, 1] = 1   # β_t gets ξ_t
-    R[5, 2] = 1   # ψ_{1,t} gets κ_t
-    R[6, 3] = 1   # ψ_{1,t}* gets κ_t^*
 
-    # Process noise covariance matrix for the shocks:
+    # Determine indices for the lowest cycle block:
+    idx_low = 2 + 2*(cycle_order - 1) + 1  # starting index for block corresponding to i = cycle_order
+    R[idx_low,     2] = 1   # ψ_{1,t} gets κ_t
+    R[idx_low+1,   3] = 1   # ψ^*_{1,t} gets κ^*_t
+
+    # Process noise covariance matrix Q (3x3):
     Q = zeros(3, 3)
     Q[1, 1] = σ_ξ
     Q[2, 2] = σ_κ
     Q[3, 3] = σ_κ
 
-    # Diffuse prior for the nonstationary states: u_t and β_t.
+    # Diffuse prior for the nonstationary trend states: u_t and β_t.
     P_diffuse = zeros(state_dim, state_dim)
     P_diffuse[1:2, 1:2] = Matrix(I, 2, 2)
 
     return Z, H, T, R, Q, P_diffuse
 end
-
 
 
 
