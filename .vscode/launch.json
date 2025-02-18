@@ -1,0 +1,14 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Launch Julia File",
+            "type": "julia",
+            "request": "launch",
+            "program": "${file}",
+            "env": {
+                "JULIA_NUM_THREADS": "4"
+            }
+        }
+    ]
+}

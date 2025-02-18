@@ -1,6 +1,6 @@
 module MCMC
 
-export MCMC_estimation, PMCMC_estimation
+export MCMC_estimation, neg_log_likelihood,  MCMC_estimation_parallel
 
 using Random
 using LinearAlgebra
@@ -8,6 +8,7 @@ using Statistics
 using Distributions
 using ProgressMeter
 using SpecialFunctions
+using Base.Threads
 
 include("State_Space_Model.jl")
 using .state_space_model
@@ -200,6 +201,27 @@ end
 # MCMC Estimation
 #########################
 
+function sample_from_prior(prior_info)
+    n_params = length(prior_info.distributions)
+    θ = zeros(n_params)
+    for i in 1:n_params
+        dist_type = prior_info.distributions[i]
+        a = prior_info.parameters[i, 1]
+        b = prior_info.parameters[i, 2]
+        if dist_type == "normal"
+            θ[i] = rand(Normal(a, b))
+        elseif dist_type == "inverse_gamma"
+            θ[i] = rand(InverseGamma(a, b))
+        elseif dist_type == "beta"
+            θ[i] = rand(Beta(a, b))
+        elseif dist_type == "uniform"
+            θ[i] = rand(Uniform(a, b))
+        else
+            error("Unknown prior distribution: $dist_type")
+        end
+    end
+    return θ
+end
 
 function MCMC_estimation(y, prior_info, a1, P1, cycle_order, σʸ;
               filter_type="kalman",
@@ -207,39 +229,205 @@ function MCMC_estimation(y, prior_info, a1, P1, cycle_order, σʸ;
               burn_init = 10000,
               iter_rec = 20000,
               burn_rec =15000,
-              θ_init = zeros(size(prior_info.support, 1)),
               ω = 0.01,
               adapt_interval = 50,
               target_low = 0.25,
-              target_high = 0.35)
+              target_high = 0.35,
+              n_chains = 1)
 
-    #############################
-    # Initialization Phase 
-    #############################
     dim = size(prior_info.support, 1)
+    obs_dim = size(y, 1)
+    
+    # Storage for chains and states across all MCMC runs
+    θ_init_chain_all = zeros(iter_init, dim, n_chains)
+    θ_chain_all       = zeros(iter_rec, dim, n_chains)
+    
+    state_dim = size(P1, 1)
+    α_draws_all       = zeros(iter_rec, state_dim, size(y,2), n_chains)
+    
+    for chain in 1:n_chains
+        println("Starting chain $chain ...")
+        #############################
+        # Initialization Phase 
+        #############################
+        # For each chain, draw an initial theta from its prior.
+        θ_start = sample_from_prior(prior_info)
+        # Transform to unbounded space.
+        Γ_current = transform_to_unbounded(θ_start, prior_info.support)
+        θ_current, log_jac_current = transform_to_bounded(Γ_current, prior_info.support)
+        current_log_post = log_posterior(θ_current, log_jac_current, prior_info, y, a1, P1, cycle_order, σʸ;
+                                         filter_type=filter_type)
+        
+        θ_init_chain = zeros(iter_init, dim)
+        Γ_chain      = zeros(iter_init, dim)
+        accept_init_total = 0
+        block_accept_count = 0
+        accept_target = (target_high+target_low)/2
+
+        pb_init = Progress(iter_init; desc="Initialization Phase (chain $chain)")
+        for s in 1:iter_init
+            # Propose new Γ using a random walk with covariance ω * I
+            Γ_star = rand(MvNormal(Γ_current, ω * I(dim)))
+            θ_star, log_jac_star = transform_to_bounded(Γ_star, prior_info.support)
+            # Check if H and Q are positive definite; else reject draw.
+            if positive_definite_check(θ_star, cycle_order, obs_dim, σʸ)
+                log_post_star = log_posterior(θ_star, log_jac_star, prior_info, y, a1, P1, cycle_order, σʸ;
+                                              filter_type=filter_type)
+                log_accept_ratio = log_post_star - current_log_post
+                if log_accept_ratio > log(rand())
+                    Γ_current = Γ_star
+                    θ_current = θ_star
+                    log_jac_current = log_jac_star
+                    current_log_post = log_post_star
+                    accept_init_total += 1
+                    block_accept_count += 1
+                end
+            end
+            θ_init_chain[s, :] = θ_current
+            Γ_chain[s, :]      = Γ_current 
+
+            # Adapt ω every adapt_interval iterations
+            if mod(s, adapt_interval) == 0
+                block_accept_rate = block_accept_count / adapt_interval
+                ω *= exp((block_accept_rate - accept_target))
+                block_accept_count = 0  # reset counter for next block
+            end
+            next!(pb_init)
+        end
+
+        init_accept_rate = accept_init_total / iter_init
+        println("Chain $chain, Initialization Acceptance Rate: $(init_accept_rate * 100)%")
+        θ_init_chain_all[:, :, chain] = θ_init_chain
+
+        # Use the draws after burn-in to compute an empirical covariance for the unbounded parameters.
+        Σ_emp = cov(Γ_chain[burn_init+1:end, :])
+        if !isposdef(Σ_emp)
+            println("Chain $chain, Empirical Covariance Matrix is not positive definite. Using identity matrix instead.")
+            Σ_emp = I(dim)
+        end
+
+        #############################
+        # Recursion Phase
+        #############################
+        # Use the final draw from initialization as the starting value.
+        Γ_current = Γ_chain[end, :]
+        θ_current, log_jac_current = transform_to_bounded(Γ_current, prior_info.support)
+        current_log_post = log_posterior(θ_current, log_jac_current, prior_info, y, a1, P1, cycle_order, σʸ;
+                                         filter_type=filter_type)
+
+        θ_chain = zeros(iter_rec, dim)
+        α_draws = zeros(iter_rec, state_dim, size(y,2))
+        accept_rec_total = 0
+        block_accept_count = 0  # for adaptive updates during recursion burn-in
+
+        pb_rec = Progress(iter_rec; desc="Recursion Phase (chain $chain)")
+        for s in 1:iter_rec
+            # Propose new Γ using the tuned covariance ω * Σ_emp
+            Γ_star = rand(MvNormal(Γ_current, ω * Σ_emp))
+            θ_star, log_jac_star = transform_to_bounded(Γ_star, prior_info.support)
+            if positive_definite_check(θ_star, cycle_order, obs_dim, σʸ)
+                log_post_star = log_posterior(θ_star, log_jac_star, prior_info, y, a1, P1, cycle_order, σʸ;
+                                              filter_type=filter_type)
+                log_accept_ratio = log_post_star - current_log_post
+
+                if log_accept_ratio > log(rand())
+                    Γ_current = Γ_star
+                    θ_current = θ_star
+                    log_jac_current = log_jac_star
+                    current_log_post = log_post_star
+                    accept_rec_total += 1
+                    block_accept_count += 1
+                end
+            end
+
+            θ_chain[s, :] = θ_current
+
+            # After burn-in, draw state trajectories using the chosen filter.
+            if s > burn_rec
+                if filter_type == "kalman"
+                    _, α_samp, _ = diffuse_kalman_filter(
+                        y, θ_current, a1, P1, cycle_order, σʸ,
+                        true, true
+                    )
+                elseif filter_type == "particle"
+                    _, α_samp = ParticleFilter.particle_filter(
+                        y, θ_current, a1, P1, cycle_order, σʸ; N_particles=2000
+                    )
+                end
+                α_draws[s, :, :] = α_samp
+            end
+
+            if mod(s, adapt_interval) == 0
+                block_accept_rate = block_accept_count / adapt_interval
+                ω *= exp((block_accept_rate - accept_target))
+                block_accept_count = 0
+            end
+            next!(pb_rec)
+        end
+
+        rec_accept_rate = accept_rec_total / iter_rec
+        println("Chain $chain, Recursion Acceptance Rate: $(rec_accept_rate * 100)%")
+
+        θ_chain_all[:, :, chain] = θ_chain
+        α_draws_all[:, :, :, chain] = α_draws
+    end
+
+    # Retain only the draws after burn-in for the recursion phase.
+    θ_chain_all = θ_chain_all[burn_rec+1:end, :, :]
+    α_draws_all = α_draws_all[burn_rec+1:end, :, :, :]
+
+    return θ_chain_all, θ_init_chain_all, α_draws_all
+end
+
+
+
+
+#########################
+# Parallel PMCMC Estimation
+#########################
+
+
+
+# Helper function: run one MCMC chain.
+function run_chain(chain::Int, y, prior_info, a1, P1, cycle_order, σʸ;
+                   filter_type="kalman",
+                   iter_init=20000,
+                   burn_init=10000,
+                   iter_rec=20000,
+                   burn_rec=15000,
+                   ω=0.01,
+                   adapt_interval=50,
+                   target_low=0.25,
+                   target_high=0.35)
+    dim = size(prior_info.support, 1)
+    obs_dim = size(y, 1)
+    state_dim = size(P1, 1)
+    
+    # Storage for the initialization phase
     θ_init_chain = zeros(iter_init, dim)
     Γ_chain = zeros(iter_init, dim)
-    obs_dim = size(y, 1)
-
-    # Initialize in unbounded space
-    # Γ_current = transform_to_unbounded(θ_init, prior_info.support)
-    Γ_current = θ_init
+    
+    # ------------------------
+    # Initialization Phase
+    # ------------------------
+    θ_start = sample_from_prior(prior_info)
+    Γ_current = transform_to_unbounded(θ_start, prior_info.support)
     θ_current, log_jac_current = transform_to_bounded(Γ_current, prior_info.support)
     current_log_post = log_posterior(θ_current, log_jac_current, prior_info, y, a1, P1, cycle_order, σʸ;
                                      filter_type=filter_type)
+    
     accept_init_total = 0
     block_accept_count = 0
-    accept_target = (target_high+target_low)/2
+    accept_target = (target_high + target_low) / 2
 
-    pb = Progress(iter_init; desc="Initialization Phase")
+
     for s in 1:iter_init
         # Propose new Γ using a random walk with covariance ω * I
         Γ_star = rand(MvNormal(Γ_current, ω * I(dim)))
         θ_star, log_jac_star = transform_to_bounded(Γ_star, prior_info.support)
-        # Check if H and Q are positive definite; else reject draw.
         if positive_definite_check(θ_star, cycle_order, obs_dim, σʸ)
             log_post_star = log_posterior(θ_star, log_jac_star, prior_info, y, a1, P1, cycle_order, σʸ;
-                                            filter_type=filter_type)
+                                          filter_type=filter_type)
             log_accept_ratio = log_post_star - current_log_post
             if log_accept_ratio > log(rand())
                 Γ_current = Γ_star
@@ -251,50 +439,43 @@ function MCMC_estimation(y, prior_info, a1, P1, cycle_order, σʸ;
             end
         end
         θ_init_chain[s, :] = θ_current
-        Γ_chain[s, :] = Γ_current 
+        Γ_chain[s, :] = Γ_current
 
         # Adapt ω every adapt_interval iterations
         if mod(s, adapt_interval) == 0
             block_accept_rate = block_accept_count / adapt_interval
-       
-            ω *= exp((block_accept_rate - accept_target)/1)
-            println(ω)
-            println(block_accept_rate)
-           
-            block_accept_count = 0  # reset counter for next block
+            ω *= exp(block_accept_rate - accept_target)
+            block_accept_count = 0
+            # println("Chain $chain, Iteration $s, ω: $ω", " Acceptance Rate: $(block_accept_rate * 100)%")
         end
-        next!(pb)
+ 
     end
 
     init_accept_rate = accept_init_total / iter_init
-    println("Initialization Acceptance Rate: $(init_accept_rate * 100)%")
-    
-    # Use the draws after burn-in to compute an empirical covariance for the unbounded parameters.
+    # println("Chain $chain, Initialization Acceptance Rate: $(init_accept_rate * 100)%")
+
+    # Compute empirical covariance from the post-burn-in draws
     Σ_emp = cov(Γ_chain[burn_init+1:end, :])
     if !isposdef(Σ_emp)
-        println("Empirical Covariance Matrix is not positive definite. Using identity matrix instead.")
+        # println("Chain $chain, Empirical Covariance Matrix is not positive definite. Using identity matrix instead.")
         Σ_emp = I(dim)
     end
 
-    #############################
+    # ------------------------
     # Recursion Phase
-    #############################
-    # Use the final draw from initialization as the starting value.
+    # ------------------------
+    # Start from the final draw of initialization
     Γ_current = Γ_chain[end, :]
     θ_current, log_jac_current = transform_to_bounded(Γ_current, prior_info.support)
     current_log_post = log_posterior(θ_current, log_jac_current, prior_info, y, a1, P1, cycle_order, σʸ;
                                      filter_type=filter_type)
 
-    n_params = dim
-    n_obs = size(y, 2)
-    state_dim = size(P1, 1)
-
-    θ_chain = zeros(iter_rec, n_params)
-    α_draws = zeros(iter_rec, state_dim, n_obs)
+    θ_chain = zeros(iter_rec, dim)
+    α_draws = zeros(iter_rec, state_dim, size(y,2))
     accept_rec_total = 0
-    block_accept_count = 0  # for adaptive updates during recursion burn-in
+    block_accept_count = 0
 
-    pb = Progress(iter_rec; desc="Recursion Phase")
+    
     for s in 1:iter_rec
         # Propose new Γ using the tuned covariance ω * Σ_emp
         Γ_star = rand(MvNormal(Γ_current, ω * Σ_emp))
@@ -303,7 +484,6 @@ function MCMC_estimation(y, prior_info, a1, P1, cycle_order, σʸ;
             log_post_star = log_posterior(θ_star, log_jac_star, prior_info, y, a1, P1, cycle_order, σʸ;
                                           filter_type=filter_type)
             log_accept_ratio = log_post_star - current_log_post
-
             if log_accept_ratio > log(rand())
                 Γ_current = Γ_star
                 θ_current = θ_star
@@ -319,96 +499,83 @@ function MCMC_estimation(y, prior_info, a1, P1, cycle_order, σʸ;
         # After burn-in, draw state trajectories using the chosen filter.
         if s > burn_rec
             if filter_type == "kalman"
+                # (Assuming diffuse_kalman_filter returns a tuple with the sampled states as the second element)
                 _, α_samp, _ = diffuse_kalman_filter(
-                    y, θ_current, a1, P1, cycle_order, σʸ,
-                    true, true
-                )
+                    y, θ_current, a1, P1, cycle_order, σʸ, true, true)
             elseif filter_type == "particle"
                 _, α_samp = ParticleFilter.particle_filter(
-                    y, θ_current, a1, P1, cycle_order, σʸ; N_particles=2000
-                )
+                    y, θ_current, a1, P1, cycle_order, σʸ; N_particles=2000)
             end
             α_draws[s, :, :] = α_samp
         end
 
+        # Adapt ω every adapt_interval iterations
         if mod(s, adapt_interval) == 0
             block_accept_rate = block_accept_count / adapt_interval
-
-            ω *= exp((block_accept_rate - accept_target)/1)
-        
+            ω *= exp(block_accept_rate - accept_target)
             block_accept_count = 0
+            # println("Chain $chain, Iteration $s, ω: $ω", " Acceptance Rate: $(block_accept_rate * 100)%")
         end
-        next!(pb)
+      
     end
 
     rec_accept_rate = accept_rec_total / iter_rec
-    println("Recursion Acceptance Rate: $(rec_accept_rate * 100)%")
+    # println("Chain $chain, Recursion Acceptance Rate: $(rec_accept_rate * 100)%")
 
-    # Retain only the draws after burn-in for the recursion phase.
-    θ_chain_post = θ_chain[burn_rec+1:end, :]
-    α_draws_post = α_draws[burn_rec+1:end, :, :]
+    # Retain only draws after burn-in for recursion phase.
+    θ_chain = θ_chain[burn_rec+1:end, :]
+    α_draws = α_draws[burn_rec+1:end, :, :]
 
-    return θ_chain_post, θ_init_chain, α_draws_post
+    return (θ_chain = θ_chain, θ_init_chain = θ_init_chain, α_draws = α_draws)
 end
 
+function MCMC_estimation_parallel(y, prior_info, a1, P1, cycle_order, σʸ;
+    filter_type="kalman",
+    iter_init = 20000,
+    burn_init = 10000,
+    iter_rec = 20000,
+    burn_rec = 15000,
+    ω = 0.01,
+    adapt_interval = 50,
+    target_low = 0.25,
+    target_high = 0.35,
+    n_chains = Threads.nthreads())
 
+    
+    # Determine dimensions.
+    dim = size(prior_info.support, 1)
+    state_dim = size(P1, 1)
+    T = size(y,2)
+    iter_rec_final = iter_rec - burn_rec  # only draws after burn-in for recursion phase
 
+    # Preallocate combined arrays matching the non-parallel function.
+    θ_init_chain_all = zeros(iter_init, dim, n_chains)
+    θ_chain_all       = zeros(iter_rec_final, dim, n_chains)
+    α_draws_all       = zeros(iter_rec_final, state_dim, T, n_chains)
 
-#########################
-# PMCMC Estimation
-#########################
+    # Run chains in parallel, collecting results.
+    @threads for chain in 1:n_chains
+        println("Starting chain $chain on thread $(threadid())")
+        res = run_chain(chain, y, prior_info, a1, P1, cycle_order, σʸ;
+            filter_type=filter_type,
+            iter_init=iter_init,
+            burn_init=burn_init,
+            iter_rec=iter_rec,
+            burn_rec=burn_rec,
+            ω=ω,
+            adapt_interval=adapt_interval,
+            target_low=target_low,
+            target_high=target_high)
 
-function PMCMC_estimation(y, initial_param, n_iterations, cycle_order, σy, a1, P1, proposal_cov, prior_info; N_particles=1000)
-    # Initialize the unbounded parameter vector and transform to the bounded (original) space.
-    # initial_Γ = transform_to_unbounded(initial_param, prior_info.support)
-    initial_Γ = initial_param
-    current_Γ = copy(initial_param)
-    current_θ, current_log_jac = transform_to_bounded(current_Γ, prior_info.support)
-    # Evaluate the log posterior using the particle filter for likelihood computation.
-    current_log_post = log_posterior(current_θ, current_log_jac, prior_info, y, a1, P1, cycle_order, σy;
-                                     filter_type="particle")
-
-    d = length(initial_Γ)
-    chain_Γ = zeros(n_iterations, d)               # Unbounded parameter chain
-    chain_θ = zeros(n_iterations, length(current_θ)) # Bounded (original) parameter chain
-    log_posts = zeros(n_iterations)
-    accepted = 0
-
-    # Store the initial values.
-    chain_Γ[1, :] = current_Γ
-    chain_θ[1, :] = current_θ
-    log_posts[1] = current_log_post
-
-    @showprogress 1 "PMCMC sampling..." for iter in 2:n_iterations
-        # Propose new unbounded parameters (random walk)
-        proposal = rand(MvNormal(zeros(d), proposal_cov))
-        proposed_Γ = current_Γ + proposal
-        # Transform proposed parameters to their original bounded space.
-        proposed_θ, proposed_log_jac = transform_to_bounded(proposed_Γ, prior_info.support)
-        # Compute the log posterior for the proposal using the particle filter.
-        proposed_log_post = log_posterior(proposed_θ, proposed_log_jac, prior_info, y, a1, P1, cycle_order, σy;
-                                          filter_type="particle")
-
-        # Calculate the log acceptance ratio.
-        log_alpha = proposed_log_post - current_log_post
-
-        # Accept/reject step.
-        if log(rand()) < log_alpha
-            current_Γ = proposed_Γ
-            current_θ = proposed_θ
-            current_log_post = proposed_log_post
-            accepted += 1
-        end
-
-        # Store the current (possibly updated) parameters.
-        chain_Γ[iter, :] = current_Γ
-        chain_θ[iter, :] = current_θ
-        log_posts[iter] = current_log_post
+        
+        θ_init_chain_all[:, :, chain] = res.θ_init_chain
+        θ_chain_all[:, :, chain]       = res.θ_chain
+        α_draws_all[:, :, :, chain]     = res.α_draws
     end
 
-    acceptance_rate = accepted / (n_iterations - 1)
-    return chain_θ, chain_Γ, log_posts, acceptance_rate
+    return θ_chain_all, θ_init_chain_all, α_draws_all
 end
+
 
 
 end  # module MCMC
