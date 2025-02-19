@@ -28,6 +28,9 @@ function rand_draw(dim, Σ; rng=Random.GLOBAL_RNG)
     return draws
 end
 
+#########################
+#  Diffuse Kalmam Filter
+#########################
 function diffuse_kalman_filter(y, θ, α1, P1, cycle_order, σʸ, do_smooth, do_sim_smooth; F_tol = 1e-8, rng=Random.GLOBAL_RNG)
     # Get state-space matrices
     Z, H, T, R, Q, P_diffuse = state_space(θ, cycle_order, σʸ)
@@ -183,6 +186,7 @@ function diffuse_kalman_filter(y, θ, α1, P1, cycle_order, σʸ, do_smooth, do_
 
     return LogL, α, P
 end
+
 
 #########################
 # Normal Kalman Filter 

@@ -224,6 +224,8 @@ function MCMC_estimation(y, prior_info, a1, P1, cycle_order, σʸ;
     
     for chain in 1:n_chains
         println("Starting chain $chain ...")
+        chain_start_time = time()  # <-- Timing start for this chain
+
         # Initialization Phase
         θ_start = sample_from_prior(prior_info; rng=rng)
         println("Chain $chain, Initial Parameters: $θ_start")
@@ -258,7 +260,7 @@ function MCMC_estimation(y, prior_info, a1, P1, cycle_order, σʸ;
             θ_init_chain[s, :] = θ_current
             Γ_chain[s, :]      = Γ_current 
 
-            if mod(s, adapt_interval) == 0
+            if mod(s, adapt_interval) == 0 
                 block_accept_rate = block_accept_count / adapt_interval
                 ω *= exp((block_accept_rate - accept_target))
                 block_accept_count = 0
@@ -318,7 +320,7 @@ function MCMC_estimation(y, prior_info, a1, P1, cycle_order, σʸ;
                 α_draws[s, :, :] = α_samp
             end
 
-            if mod(s, adapt_interval) == 0
+            if mod(s, adapt_interval) == 0 
                 block_accept_rate = block_accept_count / adapt_interval
                 ω *= exp((block_accept_rate - accept_target))
                 block_accept_count = 0
@@ -331,6 +333,9 @@ function MCMC_estimation(y, prior_info, a1, P1, cycle_order, σʸ;
 
         θ_chain_all[:, :, chain] = θ_chain
         α_draws_all[:, :, :, chain] = α_draws
+
+        # Print elapsed time for this chain (sequential)
+        println("Chain $chain completed in $(time() - chain_start_time) seconds.")
     end
 
     θ_chain_all = θ_chain_all[burn_rec+1:end, :, :]
@@ -345,7 +350,7 @@ end
 function run_chain(chain::Int, y, prior_info, a1, P1, cycle_order, σʸ;
                    filter_type="kalman",
                    iter_init=20000,
-                   burn_init=20000,
+                   burn_init=10000,
                    iter_rec=20000,
                    burn_rec=15000,
                    ω=0.01,
@@ -353,6 +358,7 @@ function run_chain(chain::Int, y, prior_info, a1, P1, cycle_order, σʸ;
                    target_low=0.25,
                    target_high=0.35,
                    rng=Random.GLOBAL_RNG)
+    chain_start_time = time()  # <-- Timing start for this chain
     dim = size(prior_info.support, 1)
     obs_dim = size(y, 1)
     state_dim = size(P1, 1)
@@ -389,7 +395,7 @@ function run_chain(chain::Int, y, prior_info, a1, P1, cycle_order, σʸ;
         θ_init_chain[s, :] = θ_current
         Γ_chain[s, :] = Γ_current
 
-        if mod(s, adapt_interval) == 0
+        if mod(s, adapt_interval) == 0 
             block_accept_rate = block_accept_count / adapt_interval
             ω *= exp(block_accept_rate - accept_target)
             block_accept_count = 0
@@ -442,7 +448,7 @@ function run_chain(chain::Int, y, prior_info, a1, P1, cycle_order, σʸ;
             α_draws[s, :, :] = α_samp
         end
 
-        if mod(s, adapt_interval) == 0
+        if mod(s, adapt_interval) == 0 
             block_accept_rate = block_accept_count / adapt_interval
             ω *= exp(block_accept_rate - accept_target)
             block_accept_count = 0
@@ -452,6 +458,9 @@ function run_chain(chain::Int, y, prior_info, a1, P1, cycle_order, σʸ;
 
     θ_chain = θ_chain[burn_rec+1:end, :]
     α_draws = α_draws[burn_rec+1:end, :, :]
+
+    # Print elapsed time for this chain (parallel)
+    println("Chain $chain on thread $(threadid()) completed in $(time() - chain_start_time) seconds.")
 
     return (θ_chain = θ_chain, θ_init_chain = θ_init_chain, α_draws = α_draws)
 end
@@ -480,8 +489,7 @@ function MCMC_estimation_parallel(y, prior_info, a1, P1, cycle_order, σʸ;
     θ_chain_all       = zeros(iter_rec_final, dim, n_chains)
     α_draws_all       = zeros(iter_rec_final, state_dim, T, n_chains)
 
-    @threads for chain in 1:n_chains
-        println("Starting chain $chain on thread $(threadid())")
+    Threads.@threads for chain in 1:n_chains
         local_rng = MersenneTwister(123 + chain)
         res = run_chain(chain, y, prior_info, a1, P1, cycle_order, σʸ;
             filter_type=filter_type,

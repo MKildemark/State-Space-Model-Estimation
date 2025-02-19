@@ -279,52 +279,7 @@ function multi_state_space(θ, cycle_order, σʸ)
 end
 
 
-########################
-# Simple bivariat for testing
-########################
 
-function simple_bi_state_space(θ, σʸ)
-    # θ = [σ²_ε_y, σ²_η_y, σ²_ε_π, σ²_η_π]
-    σ2_ε_y = θ[1]
-    σ2_η_y = θ[2]
-    σ2_ε_π = θ[3]
-    σ2_η_π = θ[4]
-
-    state_dim = 2  # [μ^y, μ^π]
-    obs_dim   = 2  # Observations: [y, π]
-
-    # 1. Observation Equation:
-    # y_t = μ_t^y + ε_t^y,  π_t = μ_t^π + ε_t^π
-    Z = Matrix{Float64}(I, obs_dim, state_dim)
-
-    # Measurement error covariance:
-    H = [σ2_ε_y   0.0;
-         0.0    σ2_ε_π]
-
-    # Optionally, if you want to rescale the observations, you can use σʸ.
-    # (Here we assume σʸ is either 1 or a 2-element vector.)
-    if length(σʸ) == 2
-        σ_scale = Diagonal(σʸ)
-        Z = inv(σ_scale) * Z
-        H = inv(σ_scale) * H * inv(σ_scale)
-    end
-
-    # 2. Transition Equation:
-    # μ_t = μ_{t-1} + η_t, so T is the identity matrix.
-    T = Matrix{Float64}(I, state_dim, state_dim)
-
-    # 3. Selection and Process Noise:
-    # The state noise enters directly:
-    R = Matrix{Float64}(I, state_dim, state_dim)
-    Q = [σ2_η_y   0.0;
-         0.0    σ2_η_π]
-
-    # Diffuse prior for the state (set as an identity matrix)
-    # P_diffuse = Matrix{Float64}(I, state_dim, state_dim)
-    P_diffuse = zeros(state_dim, state_dim)
-
-    return Z, H, T, R, Q, P_diffuse
-end
 
 
 
