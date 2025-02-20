@@ -39,10 +39,11 @@ function uni_state_space(θ, cycle_order, σʸ)
     Z[1, 1] = 1       # u_t
     Z[1, 3] = 1       # ψ_{max,t} (the first element in the first cycle block)
     # rescale
-    Z = Z ./ σʸ
+    # Z = Z ./ σʸ
 
     # Measurement error covariance:
-    H = [σ_ε / (σʸ^2)]
+    # H = [σ_ε / (σʸ^2)]
+    H = [σ_ε]
 
     ##########################
     # 2. Transition Equation
@@ -86,6 +87,8 @@ function uni_state_space(θ, cycle_order, σʸ)
             T[idx+1,   next_idx+1] = 1
         end
     end
+    # rescale
+    # T = T ./ σʸ
 
     ##########################
     # 3. Selection and Process Noise
@@ -317,12 +320,10 @@ function simulate_data(θ, cycle_order, n_obs)
     α_current = zeros(state_dim)
     for t in 1:n_obs
         # simulate state evolution:
-        η = rand(MvNormal(zeros(size(Q,1)), Q))
-        α_current = T * α_current + R * η
+        α_current = T * α_current + R * rand(MvNormal(zeros(size(Q,1)), Q))
         α[:, t] = α_current
         # simulate measurement:
-        ε = rand(MvNormal(zeros(obs_dim), H))
-        y[:, t] = Z * α_current + ε
+        y[:, t] = Z * α_current + rand(MvNormal(zeros(obs_dim), H))
     end
     
     return y, α

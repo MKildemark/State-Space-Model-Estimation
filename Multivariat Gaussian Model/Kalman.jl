@@ -34,6 +34,7 @@ end
 function diffuse_kalman_filter(y, θ, α1, P1, cycle_order, σʸ, do_smooth, do_sim_smooth; F_tol = 1e-8, rng=Random.GLOBAL_RNG)
     # Get state-space matrices
     Z, H, T, R, Q, P_diffuse = state_space(θ, cycle_order, σʸ)
+    P1 = copy(P1) 
 
     # Dimensions:
     n_obs    = size(y, 2)
@@ -67,6 +68,7 @@ function diffuse_kalman_filter(y, θ, α1, P1, cycle_order, σʸ, do_smooth, do_
     end
 
     # --- Initialize filter ---
+    P1 = copy(P1) 
     P_diff = P_diffuse
     P1[P_diffuse .== 1] .= 0  # Set diffuse-part variances to zero.
     P = P1

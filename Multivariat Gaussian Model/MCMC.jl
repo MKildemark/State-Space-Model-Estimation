@@ -133,12 +133,12 @@ end
 ########################
 # Negative Likelihood 
 ########################
-function neg_log_likelihood(θ, y, a1, P1, cycle_order, σʸ; filter_type="kalman", rng=Random.GLOBAL_RNG)
+function neg_log_likelihood(θ, y, a1, P1, cycle_order, σʸ; filter_type="kalman", N_particles=1000, rng=Random.GLOBAL_RNG)
     if filter_type == "kalman"
         LogL, _, _ = diffuse_kalman_filter(y, θ, a1, P1, cycle_order, σʸ, false, false; rng=rng)
         return -LogL
     elseif filter_type == "particle"
-        logL, _ = ParticleFilter.particle_filter(y, θ, a1, P1, cycle_order, σʸ; N_particles=2000)
+        logL, _ = ParticleFilter.particle_filter(y, θ, a1, P1, cycle_order, σʸ; N_particles=N_particles)
         return -logL
     else
         error("Unknown filter type: $filter_type")
@@ -148,8 +148,8 @@ end
 #########################
 # Log Posterior
 #########################
-function log_posterior(θ, log_jac, prior_info, y, a1, P1, cycle_order, σʸ; filter_type="kalman", rng=Random.GLOBAL_RNG)
-    log_lik = -neg_log_likelihood(θ, y, a1, P1, cycle_order, σʸ; filter_type=filter_type, rng=rng)
+function log_posterior(θ, log_jac, prior_info, y, a1, P1, cycle_order, σʸ; filter_type="kalman", N_particles=1000, rng=Random.GLOBAL_RNG)
+    log_lik = -neg_log_likelihood(θ, y, a1, P1, cycle_order, σʸ; filter_type=filter_type, N_particles=N_particles, rng=rng)
     log_pri = priors(θ, prior_info.distributions, prior_info.parameters)
     log_jacobian = sum(log_jac)
     return log_lik + log_jacobian + log_pri
@@ -186,7 +186,7 @@ function sample_from_prior(prior_info; rng=Random.GLOBAL_RNG)
             θ[i] = rand(rng, Normal(a, b))
         elseif dist_type == "inverse_gamma"
             # θ[i] = rand(rng, InverseGamma(a, b))
-            θ[i] = rand(rng, Uniform(0.0, 1e10)) # sample from inverse gamma will give inf due to infinite right tail and create problems
+            θ[i] = rand(rng, Uniform(0.0, 5.0)) # sample from inverse gamma will give inf due to infinite right tail and create problems
         elseif dist_type == "beta"
             θ[i] = rand(rng, Beta(a, b))
         elseif dist_type == "uniform"
@@ -201,12 +201,13 @@ end
 #########################
 # MCMC Estimation (Sequential)
 #########################
-function MCMC_estimation(y, prior_info, a1, P1, cycle_order, σʸ;
+function MCMC_estimation(y, prior_info_collection, a1, P1, cycle_order, σʸ;
               filter_type="kalman",
               iter_init = 20000,
               burn_init = 10000,
               iter_rec = 20000,
               burn_rec = 15000,
+              N_particles = 1000,
               ω = 0.01,
               adapt_interval = 50,
               target_low = 0.25,
@@ -214,7 +215,7 @@ function MCMC_estimation(y, prior_info, a1, P1, cycle_order, σʸ;
               n_chains = 1,
               rng=Random.GLOBAL_RNG)
 
-    dim = size(prior_info.support, 1)
+    dim = size(prior_info_collection[1].support, 1)
     obs_dim = size(y, 1)
     
     θ_init_chain_all = zeros(iter_init, dim, n_chains)
@@ -225,6 +226,7 @@ function MCMC_estimation(y, prior_info, a1, P1, cycle_order, σʸ;
     for chain in 1:n_chains
         println("Starting chain $chain ...")
         chain_start_time = time()  # <-- Timing start for this chain
+        prior_info = prior_info_collection[chain]
 
         # Initialization Phase
         θ_start = sample_from_prior(prior_info; rng=rng)
@@ -232,7 +234,7 @@ function MCMC_estimation(y, prior_info, a1, P1, cycle_order, σʸ;
         Γ_current = transform_to_unbounded(θ_start, prior_info.support)
         θ_current, log_jac_current = transform_to_bounded(Γ_current, prior_info.support)
         current_log_post = log_posterior(θ_current, log_jac_current, prior_info, y, a1, P1, cycle_order, σʸ;
-                                         filter_type=filter_type, rng=rng)
+                                         filter_type=filter_type, N_particles=N_particles, rng=rng)
         
         θ_init_chain = zeros(iter_init, dim)
         Γ_chain      = zeros(iter_init, dim)
@@ -246,7 +248,7 @@ function MCMC_estimation(y, prior_info, a1, P1, cycle_order, σʸ;
             θ_star, log_jac_star = transform_to_bounded(Γ_star, prior_info.support)
             if positive_definite_check(θ_star, cycle_order, obs_dim, σʸ)
                 log_post_star = log_posterior(θ_star, log_jac_star, prior_info, y, a1, P1, cycle_order, σʸ;
-                                              filter_type=filter_type, rng=rng)
+                                              filter_type=filter_type, N_particles=N_particles, rng=rng)
                 log_accept_ratio = log_post_star - current_log_post
                 if log_accept_ratio > log(rand(rng))
                     Γ_current = Γ_star
@@ -282,7 +284,7 @@ function MCMC_estimation(y, prior_info, a1, P1, cycle_order, σʸ;
         Γ_current = Γ_chain[end, :]
         θ_current, log_jac_current = transform_to_bounded(Γ_current, prior_info.support)
         current_log_post = log_posterior(θ_current, log_jac_current, prior_info, y, a1, P1, cycle_order, σʸ;
-                                         filter_type=filter_type, rng=rng)
+                                         filter_type=filter_type, N_particles=N_particles, rng=rng)
 
         θ_chain = zeros(iter_rec, dim)
         α_draws = zeros(iter_rec, state_dim, size(y,2))
@@ -295,7 +297,7 @@ function MCMC_estimation(y, prior_info, a1, P1, cycle_order, σʸ;
             θ_star, log_jac_star = transform_to_bounded(Γ_star, prior_info.support)
             if positive_definite_check(θ_star, cycle_order, obs_dim, σʸ)
                 log_post_star = log_posterior(θ_star, log_jac_star, prior_info, y, a1, P1, cycle_order, σʸ;
-                                              filter_type=filter_type, rng=rng)
+                                              filter_type=filter_type, N_particles=N_particles, rng=rng)
                 log_accept_ratio = log_post_star - current_log_post
                 if log_accept_ratio > log(rand(rng))
                     Γ_current = Γ_star
@@ -315,7 +317,7 @@ function MCMC_estimation(y, prior_info, a1, P1, cycle_order, σʸ;
                         y, θ_current, a1, P1, cycle_order, σʸ, true, true; rng=rng)
                 elseif filter_type == "particle"
                     _, α_samp = ParticleFilter.particle_filter(
-                        y, θ_current, a1, P1, cycle_order, σʸ; N_particles=2000)
+                        y, θ_current, a1, P1, cycle_order, σʸ; N_particles=N_particles)
                 end
                 α_draws[s, :, :] = α_samp
             end
@@ -443,7 +445,7 @@ function run_chain(chain::Int, y, prior_info, a1, P1, cycle_order, σʸ;
                     y, θ_current, a1, P1, cycle_order, σʸ, true, true; rng=rng)
             elseif filter_type == "particle"
                 _, α_samp = ParticleFilter.particle_filter(
-                    y, θ_current, a1, P1, cycle_order, σʸ; N_particles=2000)
+                    y, θ_current, a1, P1, cycle_order, σʸ; N_particles=1000)
             end
             α_draws[s, :, :] = α_samp
         end
@@ -468,7 +470,7 @@ end
 #########################
 # Parallel MCMC Estimation
 #########################
-function MCMC_estimation_parallel(y, prior_info, a1, P1, cycle_order, σʸ;
+function MCMC_estimation_parallel(y, prior_info_collection::Vector, a1, P1, cycle_order, σʸ;
     filter_type="kalman",
     iter_init = 20000,
     burn_init = 20000,
@@ -478,9 +480,9 @@ function MCMC_estimation_parallel(y, prior_info, a1, P1, cycle_order, σʸ;
     adapt_interval = 50,
     target_low = 0.25,
     target_high = 0.35,
-    n_chains = Threads.nthreads())
-
-    dim = size(prior_info.support, 1)
+    n_chains = length(prior_info_collection))
+    
+    dim = size(prior_info_collection[1].support, 1)
     state_dim = size(P1, 1)
     T = size(y,2)
     iter_rec_final = iter_rec - burn_rec
@@ -491,7 +493,8 @@ function MCMC_estimation_parallel(y, prior_info, a1, P1, cycle_order, σʸ;
 
     Threads.@threads for chain in 1:n_chains
         local_rng = MersenneTwister(123 + chain)
-        res = run_chain(chain, y, prior_info, a1, P1, cycle_order, σʸ;
+        # Pass the chain-specific prior_info
+        res = run_chain(chain, y, prior_info_collection[chain], a1, P1, cycle_order, σʸ;
             filter_type=filter_type,
             iter_init=iter_init,
             burn_init=burn_init,
@@ -510,5 +513,6 @@ function MCMC_estimation_parallel(y, prior_info, a1, P1, cycle_order, σʸ;
 
     return θ_chain_all, θ_init_chain_all, α_draws_all
 end
+
 
 end  # module MCMC
