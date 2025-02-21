@@ -13,10 +13,10 @@ using SpecialFunctions
 Random.seed!(123)
 
 #########################
-# Univariat State-Space
+# Wave Cycle Stochastic Drift 
 #########################
 
-function uni_state_space(θ, cycle_order, σʸ)
+function wave_cycle_stochastic_drift(θ, cycle_order, σʸ)
     # Parameter vector for the univariate model:
     #   θ = [ ρ, λ_c, σ_ε, σ_ξ, σ_κ ]
     ρ     = θ[1]
@@ -29,9 +29,6 @@ function uni_state_space(θ, cycle_order, σʸ)
     # Total state dimension: 2 for trend (u_t and β_t) and 2 for each cycle block.
     state_dim = 2 + 2 * cycle_order
 
-    ##########################
-    # 1. Measurement Equation
-    ##########################
     # The observation equation is:
     #   y_t = u_t + ψ_{max,t} + ε_t
     # where u_t is the first state and ψ_{max,t} is the cosine-part of the highest cycle order.
@@ -45,9 +42,7 @@ function uni_state_space(θ, cycle_order, σʸ)
     # H = [σ_ε / (σʸ^2)]
     H = [σ_ε]
 
-    ##########################
-    # 2. Transition Equation
-    ##########################
+    # Transition matrix T 
     T = zeros(state_dim, state_dim)
     # -- Trend equations --
     # u_t = u_{t-1} + β_{t-1}
@@ -55,23 +50,7 @@ function uni_state_space(θ, cycle_order, σʸ)
     # β_t = β_{t-1}  (plus shock later)
     T[2, 2] = 1
 
-    # -- Cycle equations --
-    # We will fill in the cycle transitions block-by-block.
-    #
-    # The cycle part of the state is arranged as blocks:
-    # Block 1 (states 3-4): highest cycle order (ψ_{max,t}, ψ^*_{max,t})
-    # Block 2 (states 5-6): next cycle order, etc.
-    #
-    # For block i (i = 1,...,cycle_order) the update is:
-    #   [ψ_{i,t}; ψ_{i,t}^*] = ρ R(λ_c)[ψ_{i,t-1}; ψ_{i,t-1}^*] +
-    #         { [ψ_{i-1,t-1}; ψ_{i-1,t-1}^*] if i > 1, else [κ_t; κ^*_t] }
-    #
-    # Note: In our state vector, block 1 corresponds to the highest order,
-    #       so we loop i = 1,...,cycle_order in order.
-    #
-    # Let idx_i be the starting index for block i:
-    #   idx_i = 2 + 2*(i-1) + 1.
-    #
+    # Cycle equations 
     for i in 1:cycle_order
         idx = 2 + 2*(i-1) + 1       # starting index of block i
         # Set the 2x2 rotation part:
@@ -90,19 +69,12 @@ function uni_state_space(θ, cycle_order, σʸ)
     # rescale
     # T = T ./ σʸ
 
-    ##########################
-    # 3. Selection and Process Noise
-    ##########################
-    # The model has three shocks:
-    #   - ξ_t (trend drift shock) enters β_t (state 2)
-    #   - κ_t and κ^*_t (cycle shocks) enter the lowest cycle block (block with i = cycle_order)
-    #
-    # Build the selection matrix R (state_dim x 3):
+    # Selection matrix R
     R = zeros(state_dim, 3)
     R[2, 1] = 1   # β_t gets ξ_t
 
     # Determine indices for the lowest cycle block:
-    idx_low = 2 + 2*(cycle_order - 1) + 1  # starting index for block corresponding to i = cycle_order
+    idx_low = 2 + 2*(cycle_order - 1) + 1  
     R[idx_low,     2] = 1   # ψ_{1,t} gets κ_t
     R[idx_low+1,   3] = 1   # ψ^*_{1,t} gets κ^*_t
 
@@ -123,9 +95,10 @@ end
 
 
 #########################
-# Multivariate State-Space
+# Multivariate Wave Cycle Stochastic Drift
 #########################
-function multi_state_space(θ, cycle_order, σʸ)
+
+function multivariate_wave_cycle_stochastic_drift(θ, cycle_order, σʸ)
     # Unpack parameters.
     #theta = [ ρ, λ_c, c₁, c₂, v_ε, v_ξ, v_κ, σ²_ε,y, σ²_ξ,y, σ²_κ,y, σ²_ε,π, σ²_ξ,π, σ²_κ,π ]
     ρ          = θ[1]
@@ -143,37 +116,13 @@ function multi_state_space(θ, cycle_order, σʸ)
     σ2_κ_π     = θ[10]
 
 
-    # Define the state vector dimension.
-    # Trend: 4 states
-    # Output cycle: 2*cycle_order states
-    # Inflation cycle: 2*cycle_order states
-    # Phillips lags: 2 states
-    # The state vector is ordered as:
-    #   [ uₜ^y,
-    #     βₜ^y,
-    #     uₜ^π,
-    #     βₜ^π,
-    #     (Output cycle states, 2*cycle_order elements),
-    #     (Inflation cycle states, 2*cycle_order elements),
-    #     (Phillips lags, 2 elements) ]
     state_dim = 6 + 4*cycle_order
 
-    ##########################
-    # 1. Observation Equation
-    ##########################
+   
     # The observations are:
     #   yₜ = uₜ^y + ψₜ^y  + εₜ^y
     #   πₜ = uₜ^π + ψₜ^π + pₜ + εₜ^π,   with   pₜ = c1 * (lag₁ ψₜ^y) + c2 * (lag₂ ψₜ^y)
-    #
-    # With the state–vector ordering, we take:
-    #   uₜ^y       → state[1]
-    #   uₜ^π       → state[3]
-    #   ψₜ^y (for measurement) is chosen as the first element
-    #     of the output cycle block → state[5]
-    #   ψₜ^π (for measurement) is the first element
-    #     of the inflation cycle block → state[5 + 2*cycle_order]
-    #   The Phillips lags are stored in the final two states:
-    #     tilde{ψ}ₜ^y and tilde{ψ}_{t-1}^y → state[state_dim-1] and state[state_dim]
+
     Z = zeros(2, state_dim)
     # Equation for yₜ:
     Z[1, 1] = 1            # uₜ^y
@@ -196,13 +145,8 @@ function multi_state_space(θ, cycle_order, σʸ)
         Z = inv(σʸ) * Z
         H = inv(σʸ) * H * inv(σʸ)
     end
-
-
-
-    ###########################
-    # 2. Transition Equation
-    ###########################
-  
+    
+    # Transition matrix T
     T = zeros(state_dim, state_dim)
     # Trend block (states 1–4)
     T[1,1] = 1;  T[1,2] = 1      # uₜ^y = uₜ₋₁^y + βₜ₋₁^y
@@ -240,14 +184,8 @@ function multi_state_space(θ, cycle_order, σʸ)
     T[lag_start, 5] = 1                   # tilde{ψ}ₜ^y = ψₜ₋₁^y (using output cycle's first element)
     T[lag_start+1, lag_start] = 1          # shift: tilde{ψ}_{t-1}^y = previous tilde{ψ}ₜ^y
 
-    ###########################
-    # 3. Selection and Process Noise
-    ###########################
+   
     # Innovations:
-    #   - Trend shocks: ξₜ = [ξₜ^y, ξₜ^π]′,
-    #   - Cycle shocks for base cycles: for output [κₜ^y, κₜ^{y*}]′ and for inflation [κₜ^π, κₜ^{π*}]′.
-    # Total of 6 shocks:
-    #    ηₜ = [ ξₜ^y, ξₜ^π, κₜ^y, κₜ^{y*}, κₜ^π, κₜ^{π*} ]′.
     R = zeros(state_dim, 6)
     # Trend shocks.
     R[2, 1] = 1    # βₜ^y gets ξₜ^y.
@@ -285,18 +223,100 @@ end
 
 
 
+#########################
+# Cycle-Only State-Space
+#########################
+
+function wave_cycle(θ)
+    # θ = [ρ, λ, σ²ₖ, σ²ₑ]
+    ρ    = θ[1]
+    λ    = θ[2]
+    σ²ε  = θ[3]^2
+    σ²κ  = θ[4]^2
+    
+    
+    # State dimension: two cycle states
+    state_dim = 2
+    obs_dim   = 1
+
+    # Observation equation: yₜ = ψₜ + εₜ
+    Z = zeros(1, state_dim)
+    Z[1, 1] = 1.0
+
+    # Measurement noise variance.
+    H = [σ²ε]
+
+    # Transition equation:
+    T = ρ * [cos(λ)  sin(λ);
+             -sin(λ) cos(λ)]
+    
+    # Process noise covariance matrix: independent shocks in both cycle states.
+    Q = σ²κ * Matrix{Float64}(I, state_dim, state_dim)
+    
+    # In this model, the process noise enters directly.
+    R = Matrix{Float64}(I, state_dim, state_dim)
+    
+    # Diffuse prior for the state.
+    P_diffuse = Matrix{Float64}(I, state_dim, state_dim)
+    
+    return Z, H, T, R, Q, P_diffuse
+end
+
+
+function ar1_cycle(θ)
+    # θ = [ϕ, σ²ₑ, σ²ₖ]
+    ϕ    = θ[1]
+    σ²ε  = θ[2]^2
+    σ²κ  = θ[3]^2
+    
+    # State dimension: two cycle states
+    state_dim = 2
+    obs_dim   = 1
+
+    # Observation equation: yₜ = ψₜ + εₜ
+    Z = zeros(1, state_dim)
+    Z[1, 1] = 1.0
+
+    # Measurement noise variance.
+    H = [σ²ε]
+
+    # Transition equation:
+    T = [ϕ 0;
+         1 0]
+    
+    # Process noise covariance matrix: independent shocks in both cycle states.
+    Q = σ²κ * Matrix{Float64}(I, state_dim, state_dim)
+    
+    # In this model, the process noise enters directly.
+    R = Matrix{Float64}(I, state_dim, state_dim)
+    
+    # Diffuse prior for the state.
+    P_diffuse = Matrix{Float64}(I, state_dim, state_dim)
+    
+    return Z, H, T, R, Q, P_diffuse
+end
+
+
+
+
+
+
+
+
 
 #########################
 # Choose Model
 #########################
 
-function state_space(θ, cycle_order, σʸ)
-    if length(θ) == 5
-        return uni_state_space(θ, cycle_order, σʸ)
-    elseif length(θ) == 10
-        return multi_state_space(θ, cycle_order,σʸ)
-    elseif length(θ) == 4
-        return simple_bi_state_space(θ, σʸ)
+function state_space(model, θ, σʸ; cycle_order = 1)
+    if model == "wave cycle stochastic drift"
+        return wave_cycle_stochastic_drift(θ, cycle_order, σʸ)
+    elseif model == "multivariate wave cycle stochastic drift"
+        return multivariate_wave_cycle_stochastic_drift(θ, cycle_order,σʸ)
+    elseif model == "wave cycle"
+        return wave_cycle(θ)
+    elseif model == "ar1 cycle"
+        return ar1_cycle(θ)
     else
         error("Incorrect number of parameters.")
     end
@@ -306,10 +326,10 @@ end
 #########################
 # Simulation Function
 #########################
-function simulate_data(θ, cycle_order, n_obs)
+function simulate_data(model, θ, n_obs)
     # Retrieve system matrices from the multivariate state-space function.
 
-    Z, H, T, R, Q = state_space(θ, cycle_order, 1.0)
+    Z, H, T, R, Q = state_space(model, θ, 1.0)
     state_dim = size(T, 1)
     obs_dim = size(Z, 1)  
     

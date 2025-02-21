@@ -25,11 +25,11 @@ using .ParticleFilter
 #########################
 #  Helper Check Positive Definite
 #########################
-function positive_definite_check(θ, cycle_order, obs_dim, σʸ)
+function positive_definite_check(model, θ, obs_dim, σʸ)
     if obs_dim == 1
         return true
     else
-        Z, H, T, R, Q, P_diffuse = state_space_model.state_space(θ, cycle_order, σʸ)
+        Z, H, T, R, Q, P_diffuse = state_space_model.state_space(model, θ, σʸ)
         return isposdef(H) && isposdef(Q)
     end
 end
@@ -107,7 +107,7 @@ function transform_to_bounded(Γ, support)
     for i in eachindex(Γ)
         if support[i,1] == -Inf && support[i,2] == Inf
             θ[i], log_jac[i] = θ_unbounded(Γ[i])
-        elseif support[i,1] == 0 && support[i,2] == Inf
+        elseif isfinite(support[i,1]) && support[i,2] == Inf
             θ[i], log_jac[i] = θ_bounded_below(Γ[i], support[i,1])
         else
             θ[i], log_jac[i] = θ_bounded_above_and_below(Γ[i], support[i,1], support[i,2])
@@ -133,12 +133,12 @@ end
 ########################
 # Negative Likelihood 
 ########################
-function neg_log_likelihood(θ, y, a1, P1, cycle_order, σʸ; filter_type="kalman", N_particles=1000, rng=Random.GLOBAL_RNG)
+function neg_log_likelihood(θ, model, y, a1, P1, σʸ; filter_type="kalman", N_particles=1000, rng=Random.GLOBAL_RNG)
     if filter_type == "kalman"
-        LogL, _, _ = diffuse_kalman_filter(y, θ, a1, P1, cycle_order, σʸ, false, false; rng=rng)
+        LogL, _, _ = diffuse_kalman_filter(model, y, θ, a1, P1, σʸ, false, false; rng=rng)
         return -LogL
     elseif filter_type == "particle"
-        logL, _ = ParticleFilter.particle_filter(y, θ, a1, P1, cycle_order, σʸ; N_particles=N_particles)
+        logL, _ = ParticleFilter.particle_filter(model, y, θ, a1, P1, σʸ; N_particles=N_particles)
         return -logL
     else
         error("Unknown filter type: $filter_type")
@@ -148,8 +148,8 @@ end
 #########################
 # Log Posterior
 #########################
-function log_posterior(θ, log_jac, prior_info, y, a1, P1, cycle_order, σʸ; filter_type="kalman", N_particles=1000, rng=Random.GLOBAL_RNG)
-    log_lik = -neg_log_likelihood(θ, y, a1, P1, cycle_order, σʸ; filter_type=filter_type, N_particles=N_particles, rng=rng)
+function log_posterior(model, θ,  log_jac, prior_info, y, a1, P1, σʸ; filter_type="kalman", N_particles=1000, rng=Random.GLOBAL_RNG)
+    log_lik = -neg_log_likelihood(θ, model, y, a1, P1, σʸ; filter_type=filter_type, N_particles=N_particles, rng=rng)
     log_pri = priors(θ, prior_info.distributions, prior_info.parameters)
     log_jacobian = sum(log_jac)
     return log_lik + log_jacobian + log_pri
@@ -201,7 +201,7 @@ end
 #########################
 # MCMC Estimation (Sequential)
 #########################
-function MCMC_estimation(y, prior_info_collection, a1, P1, cycle_order, σʸ;
+function MCMC_estimation(model,y, prior_info_collection, a1, P1, σʸ;
               filter_type="kalman",
               iter_init = 20000,
               burn_init = 10000,
@@ -233,7 +233,7 @@ function MCMC_estimation(y, prior_info_collection, a1, P1, cycle_order, σʸ;
         println("Chain $chain, Initial Parameters: $θ_start")
         Γ_current = transform_to_unbounded(θ_start, prior_info.support)
         θ_current, log_jac_current = transform_to_bounded(Γ_current, prior_info.support)
-        current_log_post = log_posterior(θ_current, log_jac_current, prior_info, y, a1, P1, cycle_order, σʸ;
+        current_log_post = log_posterior(model, θ_current, log_jac_current, prior_info, y, a1, P1, σʸ;
                                          filter_type=filter_type, N_particles=N_particles, rng=rng)
         
         θ_init_chain = zeros(iter_init, dim)
@@ -246,19 +246,18 @@ function MCMC_estimation(y, prior_info_collection, a1, P1, cycle_order, σʸ;
         for s in 1:iter_init
             Γ_star = rand(rng, MvNormal(Γ_current, ω * I(dim)))
             θ_star, log_jac_star = transform_to_bounded(Γ_star, prior_info.support)
-            if positive_definite_check(θ_star, cycle_order, obs_dim, σʸ)
-                log_post_star = log_posterior(θ_star, log_jac_star, prior_info, y, a1, P1, cycle_order, σʸ;
-                                              filter_type=filter_type, N_particles=N_particles, rng=rng)
-                log_accept_ratio = log_post_star - current_log_post
-                if log_accept_ratio > log(rand(rng))
-                    Γ_current = Γ_star
-                    θ_current = θ_star
-                    log_jac_current = log_jac_star
-                    current_log_post = log_post_star
-                    accept_init_total += 1
-                    block_accept_count += 1
-                end
+            log_post_star = log_posterior(model, θ_star, log_jac_star, prior_info, y, a1, P1, σʸ;
+                                          filter_type=filter_type, N_particles=N_particles, rng=rng)
+            log_accept_ratio = log_post_star - current_log_post
+            if log_accept_ratio > log(rand(rng))
+                Γ_current = Γ_star
+                θ_current = θ_star
+                log_jac_current = log_jac_star
+                current_log_post = log_post_star
+                accept_init_total += 1
+                block_accept_count += 1
             end
+    
             θ_init_chain[s, :] = θ_current
             Γ_chain[s, :]      = Γ_current 
 
@@ -283,7 +282,7 @@ function MCMC_estimation(y, prior_info_collection, a1, P1, cycle_order, σʸ;
         # Recursion Phase
         Γ_current = Γ_chain[end, :]
         θ_current, log_jac_current = transform_to_bounded(Γ_current, prior_info.support)
-        current_log_post = log_posterior(θ_current, log_jac_current, prior_info, y, a1, P1, cycle_order, σʸ;
+        current_log_post = log_posterior(model, θ_current, log_jac_current, prior_info, y, a1, P1, σʸ;
                                          filter_type=filter_type, N_particles=N_particles, rng=rng)
 
         θ_chain = zeros(iter_rec, dim)
@@ -295,32 +294,32 @@ function MCMC_estimation(y, prior_info_collection, a1, P1, cycle_order, σʸ;
         for s in 1:iter_rec
             Γ_star = rand(rng, MvNormal(Γ_current, ω * Σ_emp))
             θ_star, log_jac_star = transform_to_bounded(Γ_star, prior_info.support)
-            if positive_definite_check(θ_star, cycle_order, obs_dim, σʸ)
-                log_post_star = log_posterior(θ_star, log_jac_star, prior_info, y, a1, P1, cycle_order, σʸ;
-                                              filter_type=filter_type, N_particles=N_particles, rng=rng)
-                log_accept_ratio = log_post_star - current_log_post
-                if log_accept_ratio > log(rand(rng))
-                    Γ_current = Γ_star
-                    θ_current = θ_star
-                    log_jac_current = log_jac_star
-                    current_log_post = log_post_star
-                    accept_rec_total += 1
-                    block_accept_count += 1
-                end
+            log_post_star = log_posterior(model, θ_star, log_jac_star, prior_info, y, a1, P1, σʸ;
+                                            filter_type=filter_type, N_particles=N_particles, rng=rng)
+            log_accept_ratio = log_post_star - current_log_post
+            if log_accept_ratio > log(rand(rng))
+                Γ_current = Γ_star
+                θ_current = θ_star
+                log_jac_current = log_jac_star
+                current_log_post = log_post_star
+                accept_rec_total += 1
+                block_accept_count += 1
             end
+    
 
             θ_chain[s, :] = θ_current
 
-            if s > burn_rec
-                if filter_type == "kalman"
-                    _, α_samp, _ = diffuse_kalman_filter(
-                        y, θ_current, a1, P1, cycle_order, σʸ, true, true; rng=rng)
-                elseif filter_type == "particle"
-                    _, α_samp = ParticleFilter.particle_filter(
-                        y, θ_current, a1, P1, cycle_order, σʸ; N_particles=N_particles)
-                end
-                α_draws[s, :, :] = α_samp
-            end
+            # if s > burn_rec
+            #     if filter_type == "kalman"
+            #         _, α_samp, _ = diffuse_kalman_filter(
+            #             model, y, θ_current, a1, P1, σʸ, true, true; rng=rng)
+            #             α_draws[s, :, :] = α_samp
+            #     # elseif filter_type == "particle"
+            #     #     _, α_samp = ParticleFilter.particle_filter(
+            #     #         model, y, θ_current, a1, P1, σʸ; N_particles=N_particles)
+            #     end
+                
+            # end
 
             if mod(s, adapt_interval) == 0 
                 block_accept_rate = block_accept_count / adapt_interval
@@ -349,7 +348,7 @@ end
 #########################
 # Helper Function: Run One Chain (for Parallel)
 #########################
-function run_chain(chain::Int, y, prior_info, a1, P1, cycle_order, σʸ;
+function run_chain(chain::Int, model, y, prior_info, a1, P1, σʸ;
                    filter_type="kalman",
                    iter_init=20000,
                    burn_init=10000,
@@ -371,7 +370,7 @@ function run_chain(chain::Int, y, prior_info, a1, P1, cycle_order, σʸ;
     θ_start = sample_from_prior(prior_info; rng=rng)
     Γ_current = transform_to_unbounded(θ_start, prior_info.support)
     θ_current, log_jac_current = transform_to_bounded(Γ_current, prior_info.support)
-    current_log_post = log_posterior(θ_current, log_jac_current, prior_info, y, a1, P1, cycle_order, σʸ;
+    current_log_post = log_posterior(model, θ_current, log_jac_current, prior_info, y, a1, P1, σʸ;
                                      filter_type=filter_type, rng=rng)
     
     accept_init_total = 0
@@ -381,8 +380,8 @@ function run_chain(chain::Int, y, prior_info, a1, P1, cycle_order, σʸ;
     for s in 1:iter_init
         Γ_star = rand(rng, MvNormal(Γ_current, ω * I(dim)))
         θ_star, log_jac_star = transform_to_bounded(Γ_star, prior_info.support)
-        if positive_definite_check(θ_star, cycle_order, obs_dim, σʸ)
-            log_post_star = log_posterior(θ_star, log_jac_star, prior_info, y, a1, P1, cycle_order, σʸ;
+        if positive_definite_check(model, θ_star, obs_dim, σʸ)
+            log_post_star = log_posterior(model, θ_star, log_jac_star, prior_info, y, a1, P1,σʸ;
                                           filter_type=filter_type, rng=rng)
             log_accept_ratio = log_post_star - current_log_post
             if log_accept_ratio > log(rand(rng))
@@ -412,7 +411,7 @@ function run_chain(chain::Int, y, prior_info, a1, P1, cycle_order, σʸ;
 
     Γ_current = Γ_chain[end, :]
     θ_current, log_jac_current = transform_to_bounded(Γ_current, prior_info.support)
-    current_log_post = log_posterior(θ_current, log_jac_current, prior_info, y, a1, P1, cycle_order, σʸ;
+    current_log_post = log_posterior(model, θ_current, log_jac_current, prior_info, y, a1, P1, σʸ;
                                      filter_type=filter_type, rng=rng)
 
     θ_chain = zeros(iter_rec, dim)
@@ -423,8 +422,8 @@ function run_chain(chain::Int, y, prior_info, a1, P1, cycle_order, σʸ;
     for s in 1:iter_rec
         Γ_star = rand(rng, MvNormal(Γ_current, ω * Σ_emp))
         θ_star, log_jac_star = transform_to_bounded(Γ_star, prior_info.support)
-        if positive_definite_check(θ_star, cycle_order, obs_dim, σʸ)
-            log_post_star = log_posterior(θ_star, log_jac_star, prior_info, y, a1, P1, cycle_order, σʸ;
+        if positive_definite_check(model, θ_star, obs_dim, σʸ)
+            log_post_star = log_posterior(model, θ_star, log_jac_star, prior_info, y, a1, P1, σʸ;
                                           filter_type=filter_type, rng=rng)
             log_accept_ratio = log_post_star - current_log_post
             if log_accept_ratio > log(rand(rng))
@@ -442,10 +441,10 @@ function run_chain(chain::Int, y, prior_info, a1, P1, cycle_order, σʸ;
         if s > burn_rec
             if filter_type == "kalman"
                 _, α_samp, _ = diffuse_kalman_filter(
-                    y, θ_current, a1, P1, cycle_order, σʸ, true, true; rng=rng)
+                    model, y, θ_current, a1, P1, σʸ, true, true; rng=rng)
             elseif filter_type == "particle"
                 _, α_samp = ParticleFilter.particle_filter(
-                    y, θ_current, a1, P1, cycle_order, σʸ; N_particles=1000)
+                    model, y, θ_current, a1, P1, σʸ; N_particles=1000)
             end
             α_draws[s, :, :] = α_samp
         end
@@ -470,7 +469,7 @@ end
 #########################
 # Parallel MCMC Estimation
 #########################
-function MCMC_estimation_parallel(y, prior_info_collection::Vector, a1, P1, cycle_order, σʸ;
+function MCMC_estimation_parallel(model, y, prior_info_collection::Vector, a1, P1, σʸ;
     filter_type="kalman",
     iter_init = 20000,
     burn_init = 20000,
@@ -494,7 +493,7 @@ function MCMC_estimation_parallel(y, prior_info_collection::Vector, a1, P1, cycl
     Threads.@threads for chain in 1:n_chains
         local_rng = MersenneTwister(123 + chain)
         # Pass the chain-specific prior_info
-        res = run_chain(chain, y, prior_info_collection[chain], a1, P1, cycle_order, σʸ;
+        res = run_chain(chain, model, y, prior_info_collection[chain], a1, P1, σʸ;
             filter_type=filter_type,
             iter_init=iter_init,
             burn_init=burn_init,
