@@ -9,14 +9,15 @@ using Distributions
 using ProgressMeter
 using SpecialFunctions
 using Base.Threads
+using Revise  # auto reload
 
-include("State_Space_Model.jl")
+includet("State_Space_Model.jl")
 using .state_space_model
 
-include("Kalman.jl")
+includet("Kalman.jl")
 using .kalman
 
-include("Particle.jl")
+includet("Particle.jl")
 using .ParticleFilter
 
 # Remove or comment out the global seed if you use thread-local RNGs.

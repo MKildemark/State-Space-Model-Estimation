@@ -7,8 +7,9 @@ using LinearAlgebra
 using Statistics
 using Distributions
 using StatsBase
+using Revise  # auto reload
 
-include("State_Space_Model.jl")
+includet("State_Space_Model.jl")
 using .state_space_model
 
 

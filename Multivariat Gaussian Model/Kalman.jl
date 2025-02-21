@@ -8,8 +8,9 @@ using Statistics
 using Distributions
 using ProgressMeter
 using SpecialFunctions
+using Revise  # auto reload
 
-include("State_Space_Model.jl")
+includet("State_Space_Model.jl")
 using .state_space_model
 
 
@@ -101,29 +102,29 @@ function diffuse_kalman_filter(model, y, θ, α1, P1, σʸ, do_smooth, do_sim_sm
         for i in 1:n
             F = Z[i, :]' * P * Z[i, :] + H[i, i]
             F_diff = Z[i, :]' * P_diff * Z[i, :]
-            if F > F_tol || F_diff > F_tol
-                K = P * Z[i, :]
-                K_diff = P_diff * Z[i, :]
-                v = y[i, t] - dot(Z[i, :], α)
-                if F_diff > F_tol
-                    α = α + (K_diff / F_diff) * v
-                    P = P + (K_diff * K_diff' * F) / (F_diff^2) - (K * K_diff' + K_diff * K') / F_diff
-                    P_diff = P_diff - (K_diff * K_diff') / F_diff
-                    LogL += -0.5 * (log(2π) + log(F_diff))
-                else
-                    α = α + K * (v / F)
-                    P = P - K * (K' / F)
-                    LogL += -0.5 * (log(2π) + log(F) + (v^2)/F)
-                end
+            # if F > F_tol || F_diff > F_tol
+            K = P * Z[i, :]
+            K_diff = P_diff * Z[i, :]
+            v = y[i, t] - dot(Z[i, :], α)
+            # if F_diff > F_tol
+            #     α = α + (K_diff / F_diff) * v
+            #     P = P + (K_diff * K_diff' * F) / (F_diff^2) - (K * K_diff' + K_diff * K') / F_diff
+            #     P_diff = P_diff - (K_diff * K_diff') / F_diff
+            #     LogL += -0.5 * (log(2π) + log(F_diff))
+            # else
+            α = α + K * (v / F)
+            P = P - K * (K' / F)
+            LogL += -0.5 * (log(2π) + log(F) + (v^2)/F)
+            # end
 
-                if do_smooth
-                    v_f[t, i] = v
-                    F_f[t, i] = F
-                    K_f[:, i, t] = K
-                    F_diff_f[t, i] = F_diff
-                    K_diff_f[:, i, t] = K_diff
-                end
+            if do_smooth
+                v_f[t, i] = v
+                F_f[t, i] = F
+                K_f[:, i, t] = K
+                F_diff_f[t, i] = F_diff
+                K_diff_f[:, i, t] = K_diff
             end
+            # end
         end
         if t < m
             α = T * α
