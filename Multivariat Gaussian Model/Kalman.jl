@@ -10,7 +10,7 @@ using ProgressMeter
 using SpecialFunctions
 using Revise  # auto reload
 
-includet("State_Space_Model.jl")
+include("State_Space_Model.jl")
 using .state_space_model
 
 
@@ -34,7 +34,7 @@ end
 #########################
 function diffuse_kalman_filter(model, y, θ, α1, P1, σʸ, do_smooth, do_sim_smooth; F_tol = 1e-8, rng=Random.GLOBAL_RNG)
     # Get state-space matrices
-    Z, H, T, R, Q, P_diffuse = state_space(model, θ, σʸ)
+    Z, H, d, T, R, Q, c, P_diffuse = state_space(model, θ, σʸ)
     P1 = copy(P1) 
 
     # Dimensions:
@@ -65,6 +65,7 @@ function diffuse_kalman_filter(model, y, θ, α1, P1, σʸ, do_smooth, do_sim_sm
         Λ, M = schur(H)
         y = y * M
         Z = M' * Z
+        d = M' * d
         H = Λ
     end
 
@@ -91,7 +92,7 @@ function diffuse_kalman_filter(model, y, θ, α1, P1, σʸ, do_smooth, do_sim_sm
                 η = rand(rng, MvNormal(zeros(size(Q,1)), Q))
                 α⁺[:,t] = T * α⁺[:, t-1] + R * η 
             end
-            ε = rand(rng, MvNormal(zeros(n), H))
+            ε = rand_draw(n, H; rng=rng)
             y⁺[:, t] = Z * α⁺[:,t] + ε 
         end
         y = y - y⁺  # Subtract simulation smoother draws.
@@ -102,20 +103,21 @@ function diffuse_kalman_filter(model, y, θ, α1, P1, σʸ, do_smooth, do_sim_sm
         for i in 1:n
             F = Z[i, :]' * P * Z[i, :] + H[i, i]
             F_diff = Z[i, :]' * P_diff * Z[i, :]
-            # if F > F_tol || F_diff > F_tol
-            K = P * Z[i, :]
-            K_diff = P_diff * Z[i, :]
-            v = y[i, t] - dot(Z[i, :], α)
-            # if F_diff > F_tol
-            #     α = α + (K_diff / F_diff) * v
-            #     P = P + (K_diff * K_diff' * F) / (F_diff^2) - (K * K_diff' + K_diff * K') / F_diff
-            #     P_diff = P_diff - (K_diff * K_diff') / F_diff
-            #     LogL += -0.5 * (log(2π) + log(F_diff))
-            # else
-            α = α + K * (v / F)
-            P = P - K * (K' / F)
-            LogL += -0.5 * (log(2π) + log(F) + (v^2)/F)
-            # end
+            if F > F_tol || F_diff > F_tol
+                K = P * Z[i, :]
+                K_diff = P_diff * Z[i, :]
+                v = (y[i, t] .- d[i,:] .- Z[i, :]'* α)[1]
+                if F_diff > F_tol
+                    α = α + (K_diff / F_diff) * v
+                    P = P + (K_diff * K_diff' * F) / (F_diff^2) - (K * K_diff' + K_diff * K') / F_diff
+                    P_diff = P_diff - (K_diff * K_diff') / F_diff
+                    LogL += -0.5 * (log(2π) + log(F_diff))
+                else
+                    α = α + K * (v / F)
+                    P = P - K * (K' / F)
+                    LogL += -0.5 * (log(2π) + log(F) + (v^2)/F)
+                end
+            end
 
             if do_smooth
                 v_f[t, i] = v
@@ -127,7 +129,7 @@ function diffuse_kalman_filter(model, y, θ, α1, P1, σʸ, do_smooth, do_sim_sm
             # end
         end
         if t < m
-            α = T * α
+            α = T * α + c
             P = T * P * T' + R * Q * R'
             P_diff = T * P_diff * T'
             α_f[:, t+1] = α

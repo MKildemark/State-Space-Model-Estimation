@@ -11,13 +11,13 @@ using SpecialFunctions
 using Base.Threads
 using Revise  # auto reload
 
-includet("State_Space_Model.jl")
+include("State_Space_Model.jl")
 using .state_space_model
 
-includet("Kalman.jl")
+include("Kalman.jl")
 using .kalman
 
-includet("Particle.jl")
+include("Particle.jl")
 using .ParticleFilter
 
 # Remove or comment out the global seed if you use thread-local RNGs.
@@ -30,7 +30,7 @@ function positive_definite_check(model, θ, obs_dim, σʸ)
     if obs_dim == 1
         return true
     else
-        Z, H, T, R, Q, P_diffuse = state_space_model.state_space(model, θ, σʸ)
+        Z, H, d, T, R, Q, c, P_diffuse = state_space_model.state_space(model, θ, σʸ)
         return isposdef(H) && isposdef(Q)
     end
 end
@@ -290,10 +290,11 @@ function MCMC_estimation(model,y, prior_info_collection, a1, P1, σʸ;
         α_draws = zeros(iter_rec, state_dim, size(y,2))
         accept_rec_total = 0
         block_accept_count = 0
-
+        ω_rec = ω * Σ_emp
+        
         pb_rec = Progress(iter_rec; desc="Recursion Phase (chain $chain)")
         for s in 1:iter_rec
-            Γ_star = rand(rng, MvNormal(Γ_current, ω * Σ_emp))
+            Γ_star = rand(rng, MvNormal(Γ_current, ω_rec))
             θ_star, log_jac_star = transform_to_bounded(Γ_star, prior_info.support)
             log_post_star = log_posterior(model, θ_star, log_jac_star, prior_info, y, a1, P1, σʸ;
                                             filter_type=filter_type, N_particles=N_particles, rng=rng)
@@ -310,21 +311,20 @@ function MCMC_estimation(model,y, prior_info_collection, a1, P1, σʸ;
 
             θ_chain[s, :] = θ_current
 
-            # if s > burn_rec
-            #     if filter_type == "kalman"
-            #         _, α_samp, _ = diffuse_kalman_filter(
-            #             model, y, θ_current, a1, P1, σʸ, true, true; rng=rng)
-            #             α_draws[s, :, :] = α_samp
-            #     # elseif filter_type == "particle"
-            #     #     _, α_samp = ParticleFilter.particle_filter(
-            #     #         model, y, θ_current, a1, P1, σʸ; N_particles=N_particles)
-            #     end
-                
-            # end
+            if s > burn_rec
+                if filter_type == "kalman"
+                    _, α_samp, _ = diffuse_kalman_filter(
+                        model, y, θ_current, a1, P1, σʸ, true, true; rng=rng)
+                        α_draws[s, :, :] = α_samp
+                # elseif filter_type == "particle"
+                #     _, α_samp = ParticleFilter.particle_filter(
+                #         model, y, θ_current, a1, P1, σʸ; N_particles=N_particles)
+                end 
+            end
 
             if mod(s, adapt_interval) == 0 
                 block_accept_rate = block_accept_count / adapt_interval
-                ω *= exp((block_accept_rate - accept_target))
+                ω_rec *= exp((block_accept_rate - accept_target))
                 block_accept_count = 0
             end
             next!(pb_rec)
@@ -345,6 +345,8 @@ function MCMC_estimation(model,y, prior_info_collection, a1, P1, σʸ;
 
     return θ_chain_all, θ_init_chain_all, α_draws_all
 end
+
+
 
 #########################
 # Helper Function: Run One Chain (for Parallel)
@@ -419,9 +421,10 @@ function run_chain(chain::Int, model, y, prior_info, a1, P1, σʸ;
     α_draws = zeros(iter_rec, state_dim, size(y,2))
     accept_rec_total = 0
     block_accept_count = 0
+    ω_rec = ω * Σ_emp
 
     for s in 1:iter_rec
-        Γ_star = rand(rng, MvNormal(Γ_current, ω * Σ_emp))
+        Γ_star = rand(rng, MvNormal(Γ_current, ω_rec))
         θ_star, log_jac_star = transform_to_bounded(Γ_star, prior_info.support)
         if positive_definite_check(model, θ_star, obs_dim, σʸ)
             log_post_star = log_posterior(model, θ_star, log_jac_star, prior_info, y, a1, P1, σʸ;
@@ -443,16 +446,16 @@ function run_chain(chain::Int, model, y, prior_info, a1, P1, σʸ;
             if filter_type == "kalman"
                 _, α_samp, _ = diffuse_kalman_filter(
                     model, y, θ_current, a1, P1, σʸ, true, true; rng=rng)
-            elseif filter_type == "particle"
-                _, α_samp = ParticleFilter.particle_filter(
-                    model, y, θ_current, a1, P1, σʸ; N_particles=1000)
+            # elseif filter_type == "particle"
+            #     _, α_samp = ParticleFilter.particle_filter(
+            #         model, y, θ_current, a1, P1, σʸ; N_particles=1000)
             end
             α_draws[s, :, :] = α_samp
         end
 
         if mod(s, adapt_interval) == 0 
             block_accept_rate = block_accept_count / adapt_interval
-            ω *= exp(block_accept_rate - accept_target)
+            ω_rec *= exp(block_accept_rate - accept_target)
             block_accept_count = 0
             # println("Chain $chain, Iteration $s, ω: $ω", " Acceptance Rate: $(block_accept_rate * 100)%")
         end

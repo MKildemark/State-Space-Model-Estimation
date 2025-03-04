@@ -41,6 +41,9 @@ function wave_cycle_stochastic_drift(θ, cycle_order, σʸ)
     # H = [σ_ε / (σʸ^2)]
     H = [σ_ε]
 
+    # observation constant
+    d = [0.0]
+
     # Transition matrix T 
     T = zeros(state_dim, state_dim)
     # -- Trend equations --
@@ -83,11 +86,15 @@ function wave_cycle_stochastic_drift(θ, cycle_order, σʸ)
     Q[2, 2] = σ_κ
     Q[3, 3] = σ_κ
 
+    # state transition constant
+    c = zeros(state_dim)
+
+
     # Diffuse prior for the nonstationary trend states: u_t and β_t.
     P_diffuse = zeros(state_dim, state_dim)
     P_diffuse[1:2, 1:2] = Matrix(I, 2, 2)
 
-    return Z, H, T, R, Q, P_diffuse
+    return Z, H, d, T, R, Q, c, P_diffuse
 end
 
 #########################
@@ -117,6 +124,9 @@ function wave_cycle_stochastic_drift_no_obs(θ, cycle_order, σʸ)
 
     # Measurement error covariance: No observation noise.
     H = [0.0]
+
+    # observation constant
+    d = [0.0]
 
     # Transition matrix T 
     T = zeros(state_dim, state_dim)
@@ -160,12 +170,102 @@ function wave_cycle_stochastic_drift_no_obs(θ, cycle_order, σʸ)
     Q[2, 2] = σ_κ
     Q[3, 3] = σ_κ
 
+    # state transition constant
+    c = zeros(state_dim)
+
     # Diffuse prior for the nonstationary trend states: u_t and β_t.
     P_diffuse = zeros(state_dim, state_dim)
     P_diffuse[1:2, 1:2] = Matrix(I, 2, 2)
 
-    return Z, H, T, R, Q, P_diffuse
+    return Z, H, d, T, R, Q, c, P_diffuse
 end
+
+
+#########################
+# Wave Cycle Deterministic Drift 
+#########################
+function wave_cycle_deterministic_drift(θ, cycle_order, σʸ)
+    # Parameter vector for the deterministic drift model:
+    #   θ = [ μ, ρ, λ_c, σ_ε, σ_ξ, σ_κ ]
+    μ    = θ[1]
+    ρ    = θ[2]
+    λ_c  = θ[3]
+    σ_ε  = θ[4]
+    σ_ξ  = θ[5]
+    σ_κ  = θ[6]
+    σʸ  = σʸ[1]
+
+    # Trend part: only a level state now.
+    # Cycle part: 2 states for each cycle block.
+    state_dim = 1 + 2 * cycle_order
+
+    # Observation equation:
+    # y_t = u_t + ψ_{max,t} + ε_t,
+    # where u_t is the first state and ψ_{max,t} is the first element of the cycle block.
+    Z = zeros(1, state_dim)
+    Z[1, 1] = 1         # u_t
+    Z[1, 2] = 1         # first element of cycle block
+
+    # Measurement error covariance:
+    H = [σ_ε]
+
+    # Observation constant:
+    d = [0.0]
+
+    # Transition matrix T
+    T = zeros(state_dim, state_dim)
+    # -- Trend equation --
+    # u_t = u_{t-1} + μ + ξ_t.
+    T[1, 1] = 1;
+
+    # -- Cycle equations --
+    # Cycle states start at index 2.
+    for i in 1:cycle_order
+        idx = 2 + 2*(i-1)  # starting index for cycle block i (for i=1, idx = 2)
+        # Set the 2×2 rotation block:
+        T[idx,   idx]   = ρ * cos(λ_c)
+        T[idx,   idx+1] = ρ * sin(λ_c)
+        T[idx+1, idx]   = -ρ * sin(λ_c)
+        T[idx+1, idx+1] = ρ * cos(λ_c)
+        # For blocks 1,...,cycle_order-1, link to the next cycle block:
+        if i < cycle_order
+            next_idx = idx + 2
+            T[idx,   next_idx]   = 1
+            T[idx+1, next_idx+1] = 1
+        end
+    end
+
+    # Selection matrix R: Introduce innovations for the trend level and the cycle.
+    # Innovations:
+    #   Column 1: trend (level) innovation (ξ_t)
+    #   Columns 2 & 3: cycle innovations (κ_t and κ_t^*)
+    R = zeros(state_dim, 3)
+    R[1, 1] = 1  # trend innovation enters u_t
+
+    # Determine indices for the lowest cycle block:
+    idx_low = 2 + 2*(cycle_order - 1)  # For cycle_order=1, idx_low = 2.
+    R[idx_low,     2] = 1   # first element of lowest cycle block gets κ_t
+    R[idx_low+1,   3] = 1   # second element gets κ_t^*
+
+    # Process noise covariance matrix Q (3×3):
+    Q = zeros(3, 3)
+    Q[1, 1] = σ_ξ
+    Q[2, 2] = σ_κ
+    Q[3, 3] = σ_κ
+
+    # State transition constant:
+    # Incorporate the deterministic drift directly.
+    c = zeros(state_dim)
+    c[1] = μ
+
+    # Diffuse prior for the nonstationary trend state (u_t).
+    P_diffuse = zeros(state_dim, state_dim)
+    P_diffuse[1, 1] = 1
+
+    return Z, H, d, T, R, Q, c, P_diffuse
+end
+
+
 
 #########################
 # Multivariate Wave Cycle Stochastic Drift
@@ -215,6 +315,9 @@ function multivariate_wave_cycle_stochastic_drift(θ, cycle_order, σʸ)
         Z = inv(σʸ) * Z
         H = inv(σʸ) * H * inv(σʸ)
     end
+
+    # observation constant
+    d = zeros(2)
 
     # Transition matrix T
     T = zeros(state_dim, state_dim)
@@ -278,12 +381,116 @@ function multivariate_wave_cycle_stochastic_drift(θ, cycle_order, σʸ)
     Q[3:4, 3:4] = Σ_κ
     Q[5:6, 5:6] = Σ_κ
 
+    # state transition constant
+    c = zeros(state_dim)
+
     # Diffuse prior for the non-stationary states uₜ^y,βₜ^y,uₜ^π,βₜ^π,
     P_diffuse = zeros(state_dim, state_dim)
     P_diffuse[1:4, 1:4] = Matrix(I, 4, 4)
 
-    return Z, H, T, R, Q, P_diffuse
+    return Z, H, d, T, R, Q, c, P_diffuse
 end
+
+
+
+#########################
+# Multivariate Wave Cycle Stochastic Drift No Noise
+#########################
+
+function multivariate_wave_cycle_stochastic_drift_no_obs(θ, cycle_order, σʸ)
+    # Parameter vector for the noise-free multivariate model:
+    #   θ = [ ρ, λ_c, c₁, c₂, σ²_ξ,y, σ²_κ,y, σ²_ξ,π, σ²_κ,π ]
+    ρ         = θ[1]
+    λ_c       = θ[2]
+    c_1       = θ[3]
+    c_2       = θ[4]
+    σ2_ξ_y    = θ[5]
+    σ2_κ_y    = θ[6]
+    σ2_ξ_π    = θ[7]
+    σ2_κ_π    = θ[8]
+
+    state_dim = 6 + 4*cycle_order
+
+    # Observation equations (same structure as before)
+    Z = zeros(2, state_dim)
+    Z[1, 1] = 1            # uₜ^y
+    Z[1, 5] = 1            # ψₜ^y (output cycle, first element)
+    Z[2, 3] = 1            # uₜ^π
+    Z[2, 5 + 2*cycle_order] = 1  # ψₜ^π (inflation cycle, first element)
+    Z[2, state_dim-1] = c_1      # lag 1 of ψₜ^y
+    Z[2, state_dim]   = c_2      # lag 2 of ψₜ^y
+
+    # No measurement noise.
+    H = zeros(2,2)
+
+    if length(σʸ) == 2
+        σʸ = Diagonal(σʸ)
+        Z = inv(σʸ) * Z
+        # H remains zero.
+    end
+
+    # observation constant
+    d = zeros(2)
+
+    T = zeros(state_dim, state_dim)
+    T[1,1] = 1;  T[1,2] = 1      # uₜ^y = uₜ₋₁^y + βₜ₋₁^y
+    T[2,2] = 1                  # βₜ^y = βₜ₋₁^y + ξₜ^y
+    T[3,3] = 1;  T[3,4] = 1      # uₜ^π = uₜ₋₁^π + βₜ₋₁^π
+    T[4,4] = 1                  # βₜ^π = βₜ₋₁^π + ξₜ^π
+
+    rotation_matrix = ρ * [ cos(λ_c) sin(λ_c); -sin(λ_c) cos(λ_c) ]
+
+    # (a) Output cycle block.
+    out_start = 5
+    for n in 1:cycle_order
+        idx = out_start + 2*(n - 1)
+        T[idx:idx+1, idx:idx+1] = rotation_matrix
+        if n < cycle_order
+            T[idx:idx+1, idx+2:idx+3] += I(2)
+        end
+    end
+
+    # (b) Inflation cycle block.
+    inf_start = 5 + 2*cycle_order
+    for n in 1:cycle_order
+        idx = inf_start + 2*(n - 1)
+        T[idx:idx+1, idx:idx+1] = rotation_matrix
+        if n < cycle_order
+            T[idx:idx+1, idx+2:idx+3] += I(2)
+        end
+    end
+
+    # (c) Phillips lags block.
+    lag_start = state_dim - 1
+    T[lag_start, 5] = 1
+    T[lag_start+1, lag_start] = 1
+
+    R = zeros(state_dim, 6)
+    R[2, 1] = 1    # βₜ^y gets ξₜ^y.
+    R[4, 2] = 1    # βₜ^π gets ξₜ^π.
+    out_base_idx = out_start + 2*(cycle_order - 1)
+    R[out_base_idx:out_base_idx+1, 3:4] = I(2)
+    inf_base_idx = inf_start + 2*(cycle_order - 1)
+    R[inf_base_idx:inf_base_idx+1, 5:6] = I(2)
+
+    # Process noise covariance.
+    Σ_ξ = [σ2_ξ_y 0; 0 σ2_ξ_π]
+    Σ_κ = [σ2_κ_y 0; 0 σ2_κ_π]
+    Q = zeros(6, 6)
+    Q[1:2, 1:2] = Σ_ξ
+    Q[3:4, 3:4] = Σ_κ
+    Q[5:6, 5:6] = Σ_κ
+
+    # state transition constant
+    c = zeros(state_dim)
+
+    P_diffuse = zeros(state_dim, state_dim)
+    P_diffuse[1:4, 1:4] = Matrix(I, 4, 4)
+
+    return Z, H, c, T, R, Q, d, P_diffuse
+end
+
+
 
 #########################
 # Cycle-Only models
@@ -307,6 +514,9 @@ function wave_cycle(θ)
     # Measurement noise variance.
     H = [σ²ε]
 
+    # observation constant
+    d = [0.0]
+
     # Transition equation:
     T = ρ * [cos(λ)  sin(λ);
              -sin(λ) cos(λ)]
@@ -316,11 +526,14 @@ function wave_cycle(θ)
     
     # In this model, the process noise enters directly.
     R = Matrix{Float64}(I, state_dim, state_dim)
+
+    # state transition constant
+    c = zeros(state_dim)
     
     # Diffuse prior for the state.
     P_diffuse = zeros(state_dim, state_dim)
     
-    return Z, H, T, R, Q, P_diffuse
+    return Z, H, d, T, R, Q, c, P_diffuse
 end
 
 function ar1_cycle(θ)
@@ -340,6 +553,9 @@ function ar1_cycle(θ)
     # Measurement noise variance.
     H = [σ_ϵ^2]
 
+    # observation constant
+    d = [0.0]
+
     # Transition equation in companion form.
     T = [ϕ  0;
          1  0]
@@ -350,11 +566,14 @@ function ar1_cycle(θ)
     R[1, 1] = 1.0
     # Q is scalar (variance for the state noise)
     Q = [σ_κ^2]
+
+    # state transition constant
+    c = zeros(state_dim)
     
     # Diffuse prior for the state.
     P_diffuse = zeros(state_dim, state_dim)
     
-    return Z, H, T, R, Q, P_diffuse
+    return Z, H, d, T, R, Q, c, P_diffuse
 end
 
 function ar1_cycle_no_obs(θ)
@@ -369,16 +588,20 @@ function ar1_cycle_no_obs(θ)
 
     H = [0.0]  # No observation noise
 
+    d = [0.0]
+
     T = [ϕ  0;
          1  0]
     
     R = zeros(state_dim, 1)
     R[1, 1] = 1.0
     Q = [σ_k^2]
+
+    c = zeros(state_dim)
     
     P_diffuse = zeros(state_dim, state_dim)
     
-    return Z, H, T, R, Q, P_diffuse
+    return Z, H, c, T, R, Q, d, P_diffuse
 end
 
 function wave_cycle_no_obs(θ)
@@ -394,16 +617,27 @@ function wave_cycle_no_obs(θ)
 
     H = [0.0]  # No observation noise
 
+    d = [0.0]
+
     T = ρ * [cos(λ)  sin(λ);
              -sin(λ) cos(λ)]
     
     Q = (σ_k^2) * Matrix{Float64}(I, state_dim, state_dim)
     R = Matrix{Float64}(I, state_dim, state_dim)
+
+    c = zeros(state_dim)
     
     P_diffuse = zeros(state_dim, state_dim)
     
-    return Z, H, T, R, Q, P_diffuse
+    return Z, H, d, T, R, Q, c, P_diffuse
 end
+
+
+
+
+
+
+
 
 #########################
 # Choose Model
@@ -412,8 +646,12 @@ end
 function state_space(model, θ, σʸ; cycle_order = 1)
     if model == "wave cycle stochastic drift"
         return wave_cycle_stochastic_drift(θ, cycle_order, σʸ)
+    elseif model == "wave cycle deterministic drift"
+        return wave_cycle_deterministic_drift(θ, cycle_order, σʸ)
     elseif model == "multivariate wave cycle stochastic drift"
         return multivariate_wave_cycle_stochastic_drift(θ, cycle_order, σʸ)
+    elseif model == "multivariate wave cycle stochastic drift no noise"
+        return multivariate_wave_cycle_stochastic_drift_no_obs(θ, cycle_order, σʸ)
     elseif model == "wave cycle"
         return wave_cycle(θ)
     elseif model == "ar1 cycle"
@@ -435,7 +673,7 @@ end
 
 function simulate_data(model, θ, n_obs)
     # Retrieve system matrices from the state-space function.
-    Z, H, T, R, Q = state_space(model, θ, 1.0)
+    Z, H, d, T, R, Q, c = state_space(model, θ, 1.0)
     state_dim = size(T, 1)
     obs_dim = size(Z, 1)
     
@@ -446,11 +684,11 @@ function simulate_data(model, θ, n_obs)
     α_current = zeros(state_dim)
     for t in 1:n_obs
         # simulate state evolution:
-        α_current = T * α_current + R * rand(MvNormal(zeros(size(Q,1)), Q))
+        α_current = c + T * α_current + R * rand(MvNormal(zeros(size(Q,1)), Q))
         α[:, t] = α_current
         # simulate measurement:
-        ϵ = rand(MvNormal(zeros(obs_dim), H))
-        y[:, t] = Z * α_current + ϵ
+        ϵ = (norm(H) < 1e-12) ? zeros(obs_dim) : rand(MvNormal(zeros(obs_dim), H))
+        y[:, t] = d + Z * α_current + ϵ
     end
     
     return y, α
